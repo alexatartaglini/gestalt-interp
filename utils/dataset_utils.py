@@ -532,7 +532,7 @@ class ContinuityDataset(Dataset):
                     step_box = (target_token_image_coords[0], target_token_image_coords[1] + step)
             elif transformation == "rotation":
                 step_box = (target_token_image_coords[0], target_token_image_coords[1])
-                target_patch = target_patch.rotate(step)
+                target_patch = target_patch.rotate(step, fillcolor=bg_color)
 
             step_image.paste(target_patch, box=step_box)
             step_image.save(os.path.join(experiment_cfg["experiment_path"], image_filename))

@@ -430,6 +430,60 @@ def generate_unraveled_open_path_points(
 
     return points
 
+def generate_open_curve_fixed_size(
+    image_size,
+    num_points,
+    shape_size,
+    margin=32,
+    rng=None,
+    lateral_frac=0.35,
+    mix_beta=0.25,
+):
+    if rng is None:
+        rng = np.random.default_rng()
+
+    W, H = image_size
+
+    # --- endpoints ---
+    for _ in range(100):
+        center = rng.uniform([margin, margin], [W-margin, H-margin])
+        theta = rng.uniform(0, 2*np.pi)
+        u = np.array([np.cos(theta), np.sin(theta)])
+        v = np.array([-u[1], u[0]])
+
+        p0 = center - 0.5 * shape_size * u
+        p1 = center + 0.5 * shape_size * u
+
+        if all(margin <= p0) and p0[0] <= W-margin and p0[1] <= H-margin \
+           and all(margin <= p1) and p1[0] <= W-margin and p1[1] <= H-margin:
+            break
+    else:
+        raise RuntimeError("Could not place endpoints")
+
+    points = [p0, p1]
+
+    # --- interior sampling ---
+    D = shape_size
+    alpha = lateral_frac
+
+    interior = []
+    for _ in range(num_points - 2):
+        t = rng.uniform(0, D)
+        s = rng.uniform(-alpha*D, alpha*D)
+        p = p0 + t*u + s*v
+        interior.append(p)
+
+    # --- ordering ---
+    def sort_key(p):
+        t = np.dot(p - p0, u)
+        s = np.dot(p - p0, v)
+        w = np.sin(np.pi * t / D)
+        return t + mix_beta * w * s
+
+    interior.sort(key=sort_key)
+
+    return [p0] + interior + [p1]
+
 #### DRAWING FUNCTIONS
 
 def draw_blob(draw: ImageDraw.ImageDraw, keypoints, fill, outline=None, samples_per_seg: int = 25):

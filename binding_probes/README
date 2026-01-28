@@ -1,0 +1,7 @@
+Minimal refactor of the binding VITs paper.
+
+First, run cache_activations to store hidden states and scaled segmentation maps for ADE20K images.
+Then, run train_probes to train quadratic probes on this data.
+
+Next, copy gestalt data and unzip it under binding_probes/cache and run gestalt_eval to test your trained probe
+on the synthetic gestalt data.

@@ -43,6 +43,9 @@ class ExperimentDataset(Dataset):
 
     def setup(self):
         segmentation = Image.open(self.cfg["segmentation_path"]).convert("1")
+        
+        if segmentation.size != (224, 224):  # TODO: make this dynamic
+            segmentation = segmentation.resize((224, 224), Image.Resampling.LANCZOS)
 
         npy, npx, is_perim, _, is_interior, is_bg, shape_frac_grid = patch_grid_labels_mode1(
             segmentation,
@@ -202,7 +205,7 @@ class ContinuityDatasetConfig:
         self.colors = self.colors if isinstance(self.colors, list) else [self.colors]
 
         if self.controls is None:
-            self.controls = [None]
+            self.controls = None
         elif isinstance(self.controls, list):
             self.controls = self.controls
         else:
@@ -215,7 +218,7 @@ class ContinuityDatasetConfig:
 
 
 class ContinuityDataset(Dataset):
-    def __init__(self, cfg: Union[dict, ContinuityDatasetConfig] = None, load_if_exists: bool = True):        
+    def __init__(self, cfg: Union[dict, ContinuityDatasetConfig] = None, load_if_exists: bool = True):  
         if load_if_exists: 
             self.cfg = cfg
             if isinstance(cfg, dict):
@@ -239,8 +242,12 @@ class ContinuityDataset(Dataset):
             if isinstance(cfg, dict):
                 self.cfg = ContinuityDatasetConfig(self.cfg)
 
-            if os.path.exists(self.cfg.full_path):
-                shutil.rmtree(self.cfg.full_path)
+            if os.path.exists(os.path.join(self.cfg.full_path, "experiments")):
+                shutil.rmtree(os.path.join(self.cfg.full_path, "experiments"))
+            if os.path.exists(os.path.join(self.cfg.full_path, "theoretical_tuning_curves")):
+                shutil.rmtree(os.path.join(self.cfg.full_path, "theoretical_tuning_curves"))
+            if os.path.exists(os.path.join(self.cfg.full_path, "cfg.yaml")):
+                os.remove(os.path.join(self.cfg.full_path, "cfg.yaml"))
 
             self.rng = np.random.RandomState(self.cfg.seed)
         
@@ -427,16 +434,7 @@ class ContinuityDataset(Dataset):
         # Create a new binary segmentation image where pixels matching shape_color are 1, bg_color are 0
         segmentation = self._create_segmentation(image, shape_color, bg_color)
 
-        # Create transformation directions and perimeter tokens
-        is_curve = shape_type in ["curve", "closedcurve"]
-        interior_shape_frac_min = 0.1 if is_curve else 1.0
-        transformation_directions, perimeter_tokens, target_tokens, neighbor_tokens = self._build_transformation_directions_and_perimeter_tokens(
-            segmentation,
-            is_curve=is_curve,
-            interior_shape_frac_min=interior_shape_frac_min,
-        )
-
-        return image, segmentation, perimeter_tokens, target_tokens, transformation_directions, neighbor_tokens, scene_colors
+        return image, segmentation, scene_colors
 
     def _create_theoretical_tuning_curve(self, ps):
         ss = self.cfg.transformation_step_size
@@ -498,9 +496,11 @@ class ContinuityDataset(Dataset):
         )
 
         base = image.copy().convert("RGB")
-        bg_patch = Image.new("RGB", (patch_size, patch_size), bg_color)
         target_patch = base.crop(box=(target_token_image_coords))
-        base.paste(bg_patch, box=(target_token_image_coords[0], target_token_image_coords[1]))  # Overwrite the target patch with a bg patch
+
+        if bg_color is not None:  # Overwrite the target patch with a bg patch
+            bg_patch = Image.new("RGB", (patch_size, patch_size), bg_color)
+            base.paste(bg_patch, box=(target_token_image_coords[0], target_token_image_coords[1])) 
 
         # If we are creating a control that augments the color, then augment the target patch
         if experiment_cfg["control"] is not None:
@@ -520,6 +520,8 @@ class ContinuityDataset(Dataset):
             elif transformation_direction == "counterclockwise":
                 step_offset = list(range(0, -360, -ss))
             filename_width = len(str(360)) + 2
+        else:
+            raise ValueError(f"Invalid transformation: {transformation}")
 
         for s, step in enumerate(step_offset):
             image_filename = f"offset_{step:+0{filename_width}d}.png"
@@ -562,19 +564,55 @@ class ContinuityDataset(Dataset):
         transformation = self.cfg.transformation
         n_color_combinations = self.cfg.n_color_combinations
 
-        experiment_params = itertools.product(shape_types, shape_complexities, shape_sizes, transformation)
-        experiment_paths = []
-        for _, params in tqdm.tqdm(enumerate(experiment_params), desc="Creating dataset from config"):
-            for _ in range(n_color_combinations):
+        # Check if scene images already exist
+        scene_images = glob.glob(os.path.join(self.cfg.full_path, "scenes", "*.png"))
+        scenes_exist = len(scene_images) > 0
+
+        if scenes_exist:
+            desc = "Creating dataset from existing scenes"
+            eids = [f.split("/")[-1].replace(".png", "") for f in scene_images]
+            experiment_params = [("", "", "", transformation[0]) for _ in eids]
+        else:
+            desc = "Creating dataset from config"
+            experiment_params = itertools.product(shape_types, shape_complexities, shape_sizes, transformation)
+            experiment_params = list(experiment_params)
+            eids = []
+            for _ in range(len(experiment_params)*n_color_combinations):
                 eid = uuid.uuid4().hex[:experiment_id_digits]
-                while eid in experiment_paths:
+                while eid in eids:
                     eid = uuid.uuid4().hex[:experiment_id_digits]
+                eids.append(eid)
+        
+        for p, params in tqdm.tqdm(enumerate(experiment_params), desc=desc):
+            for n in range(n_color_combinations):
+                eid = eids[p*n_color_combinations + n]
 
                 experiment_path = os.path.join(self.cfg.full_path, "experiments", eid)
                 os.makedirs(experiment_path, exist_ok=True)  # Create overall experiment directory
 
-                image, segmentation, perimeter_tokens, target_tokens, transformation_directions, neighbor_tokens, scene_colors = self._create_image_and_segmentation(
-                    *params,
+                if scenes_exist:  # Use existing scene and segmentation
+                    image = Image.open(os.path.join(self.cfg.full_path, "scenes", f"{eid}.png"))
+                    image = image.resize((self.cfg.image_size[0], self.cfg.image_size[1]), Image.Resampling.LANCZOS)
+                    segmentation = Image.open(os.path.join(self.cfg.full_path, "segmentations", f"{eid}.png")).convert("1")
+                    segmentation = segmentation.resize((self.cfg.image_size[0], self.cfg.image_size[1]), Image.Resampling.LANCZOS)
+                    scene_colors = ("", "", "")
+                else:  # Create new scene based on experiment parameters
+                    image, segmentation, scene_colors = self._create_image_and_segmentation(
+                        *params,
+                    )
+                    scene_path = os.path.join(self.cfg.full_path, "scenes", f"{eid}.png")
+                    image.save(scene_path)
+
+                    segmentation_path = os.path.join(self.cfg.full_path, "segmentations", f"{eid}.png")
+                    segmentation.save(segmentation_path)
+
+                # Create transformation directions and perimeter tokens
+                is_curve = params[0] in ["curve", "closedcurve"]
+                interior_shape_frac_min = 0.1 if is_curve else 1.0
+                transformation_directions, perimeter_tokens, target_tokens, neighbor_tokens = self._build_transformation_directions_and_perimeter_tokens(
+                    segmentation,
+                    is_curve=is_curve,
+                    interior_shape_frac_min=interior_shape_frac_min,
                 )
                 
                 experiment_config = {
@@ -600,11 +638,6 @@ class ContinuityDataset(Dataset):
                     "perimeter_tokens": perimeter_tokens,
                     "target_tokens": target_tokens,
                 }
-                scene_path = os.path.join(self.cfg.full_path, "scenes", f"{eid}.png")
-                image.save(scene_path)
-
-                segmentation_path = os.path.join(self.cfg.full_path, "segmentations", f"{eid}.png")
-                segmentation.save(segmentation_path)
 
                 min_number_target_tokens = min(len(target_tokens[patch_size]) for patch_size in self.cfg.patch_sizes)
 
@@ -652,6 +685,8 @@ class ContinuityDataset(Dataset):
                                 self._create_experiment(image, cfg)
 
     def color_name_to_rgb(self, name):
+        if len(name) == 0:
+            return None
         r, g, b = to_rgb(name)  # returns floats in [0,1]
         return tuple(int(255 * x) for x in (r, g, b))
 

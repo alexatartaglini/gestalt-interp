@@ -1,6 +1,7 @@
 import math
 import numpy as np
 from PIL import ImageDraw
+from scipy.ndimage import gaussian_filter1d
 
 ### GEOMETRY HELPER FUNCTIONS
 
@@ -116,6 +117,112 @@ def would_self_intersect(points, new_pt):
         if segments_intersect(p1, p2, q1, q2):
             return True
     return False
+
+def satisfies_min_angle(points, max_turn_deg):
+    """
+    Enforces that the direction change (turn angle) at each interior point
+    does not exceed max_turn_deg.
+    """
+    if len(points) < 3:
+        return True
+
+    max_turn = math.radians(max_turn_deg)
+
+    for i in range(1, len(points) - 1):
+        x0, y0 = points[i - 1]
+        x1, y1 = points[i]
+        x2, y2 = points[i + 1]
+
+        v_in  = (x1 - x0, y1 - y0)
+        v_out = (x2 - x1, y2 - y1)
+
+        n1 = math.hypot(*v_in)
+        n2 = math.hypot(*v_out)
+        if n1 == 0 or n2 == 0:
+            return False
+
+        cos_theta = (v_in[0] * v_out[0] + v_in[1] * v_out[1]) / (n1 * n2)
+        cos_theta = max(-1.0, min(1.0, cos_theta))
+
+        theta = math.acos(cos_theta)
+        turn_angle = math.pi - theta
+
+        if turn_angle > max_turn:
+            return False
+
+    return True
+
+def rotate_to_min_turn(v_in, v_out, min_angle):
+    """
+    Adjust v_out so that min(angle, 2π-angle) == min_angle.
+    Returns new v_out (same length).
+    """
+    # normalize
+    n_out = np.linalg.norm(v_out)
+    if n_out == 0:
+        return v_out
+
+    v_in_n = v_in / np.linalg.norm(v_in)
+    v_out_n = v_out / n_out
+
+    cosθ = np.dot(v_in_n, v_out_n)
+    cosθ = np.clip(cosθ, -1.0, 1.0)
+
+    θ = math.acos(cosθ)
+    turn = min(θ, 2 * math.pi - θ)
+
+    if turn >= min_angle:
+        return v_out  # already valid
+
+    # determine rotation direction
+    cross = v_in_n[0] * v_out_n[1] - v_in_n[1] * v_out_n[0]
+    sign = np.sign(cross) if cross != 0 else 1.0
+
+    # rotate v_out_n to exactly min_angle
+    target_angle = min_angle * sign
+    c, s = math.cos(target_angle), math.sin(target_angle)
+
+    R = np.array([[c, -s], [s, c]])
+    v_new = R @ v_in_n
+
+    return v_new * n_out
+
+def relax_turn_angles(points, min_angle_deg, alpha=0.7):
+    """
+    One Gauss–Seidel relaxation pass.
+    alpha < 1 damps updates for stability.
+    """
+    min_angle = math.radians(min_angle_deg)
+    pts = [np.array(p, dtype=float) for p in points]
+
+    for i in range(1, len(pts) - 1):
+        v_in = pts[i - 1] - pts[i]
+        v_out = pts[i + 1] - pts[i]
+
+        v_new = rotate_to_min_turn(v_in, v_out, min_angle)
+        pts[i + 1] = pts[i] + alpha * v_new + (1 - alpha) * v_out
+
+    return [tuple(p) for p in pts]
+
+def enforce_min_turn_angles(
+    points,
+    min_angle_deg,
+    max_iters=15,
+    tol=1e-3,
+):
+    pts = points
+    for _ in range(max_iters):
+        if satisfies_min_angle(pts, min_angle_deg):
+            return pts
+        new_pts = relax_turn_angles(pts, min_angle_deg)
+        shift = max(
+            math.hypot(a[0] - b[0], a[1] - b[1])
+            for a, b in zip(pts, new_pts)
+        )
+        pts = new_pts
+        if shift < tol:
+            break
+    return pts
 
 def _dist2_point_to_segment(p, a, b):
     # squared distance from p to segment a-b
@@ -314,6 +421,9 @@ def generate_unraveled_open_path_points(
     repel_radius: float = 22.0,  # avoid being closer than this to earlier polyline
     end_far_fraction: float = 0.55,  # end must be far from start (relative to max possible)
 
+    # enforce minimum angle between segments
+    min_angle_deg: float = 100.0,
+
     # safety:
     max_tries: int = 15000,
 ):
@@ -406,6 +516,7 @@ def generate_unraveled_open_path_points(
             repel_radius=max(10.0, repel_radius * 0.85),
             end_far_fraction=end_far_fraction,
             max_tries=max_tries,
+            min_angle_deg=min_angle_deg,
         )
 
     # 4) enforce endpoint “not almost closed”: end far from start
@@ -426,9 +537,110 @@ def generate_unraveled_open_path_points(
             repel_radius=repel_radius,
             end_far_fraction=max(0.35, end_far_fraction * 0.9),
             max_tries=max_tries,
+            min_angle_deg=min_angle_deg,
+        )
+
+    # 5) enforce minimum angle constraint
+    points = enforce_min_turn_angles(points, min_angle_deg)
+
+    if not satisfies_min_angle(points, min_angle_deg):
+        return generate_unraveled_open_path_points(
+            image_size=image_size,
+            num_points=num_points,
+            margin=margin,
+            rng=rng,
+            step_range=step_range,
+            max_turn_deg=max_turn_deg,
+            forward_min=forward_min,
+            repel_radius=repel_radius,
+            end_far_fraction=end_far_fraction,
+            max_tries=max_tries,
+            min_angle_deg=min_angle_deg,
         )
 
     return points
+
+def generate_backbone(image_size, num_points, shape_size, margin, rng):
+    W, H = image_size
+    x_lo, x_hi = margin, W - margin
+    y_lo, y_hi = margin, H - margin
+
+    # random forward direction
+    phi = rng.uniform(0, 2 * math.pi)
+    d = np.array([math.cos(phi), math.sin(phi)])
+
+    # choose start so end stays inside
+    center = np.array([
+        rng.uniform(x_lo + shape_size, x_hi - shape_size),
+        rng.uniform(y_lo + shape_size, y_hi - shape_size),
+    ])
+
+    start = center - 0.5 * shape_size * d
+    end   = center + 0.5 * shape_size * d
+
+    t = np.linspace(0, 1, num_points)
+    backbone = (1 - t)[:, None] * start + t[:, None] * end
+    return backbone
+
+def gaussian_smooth_1d(x, sigma):
+    radius = int(3 * sigma)
+    t = np.arange(-radius, radius + 1)
+    kernel = np.exp(-(t**2) / (2 * sigma**2))
+    kernel /= kernel.sum()
+    return np.convolve(x, kernel, mode="same")
+
+def add_lateral_noise(backbone, max_amp, smooth_sigma, rng):
+    pts = backbone.copy()
+
+    # tangent directions
+    tangents = np.gradient(pts, axis=0)
+    tangents /= np.linalg.norm(tangents, axis=1, keepdims=True)
+
+    # normals
+    normals = np.stack([-tangents[:, 1], tangents[:, 0]], axis=1)
+
+    noise = rng.normal(0, 1, size=len(pts))
+    noise = gaussian_smooth_1d(noise, smooth_sigma)
+    noise /= np.max(np.abs(noise)) + 1e-8
+
+    pts += normals * noise[:, None] * max_amp
+    return pts
+
+def clamp_points(pts, image_size, margin):
+    W, H = image_size
+    pts[:, 0] = np.clip(pts[:, 0], margin, W - margin)
+    pts[:, 1] = np.clip(pts[:, 1], margin, H - margin)
+    return pts
+
+def generate_open_curve_points(
+    image_size,
+    num_points,
+    shape_size=120.0,
+    wiggle_amp=20.0,
+    wiggle_smooth=6.0,
+    margin=32,
+    rng=None,
+):
+    if rng is None:
+        rng = np.random.default_rng()
+
+    backbone = generate_backbone(
+        image_size=image_size,
+        num_points=num_points,
+        shape_size=shape_size,
+        margin=margin,
+        rng=rng,
+    )
+
+    pts = add_lateral_noise(
+        backbone,
+        max_amp=wiggle_amp,
+        smooth_sigma=wiggle_smooth,
+        rng=rng,
+    )
+
+    pts = clamp_points(pts, image_size, margin)
+    return [tuple(p) for p in pts]
 
 def generate_open_curve_fixed_size(
     image_size,
@@ -562,10 +774,13 @@ def add_random_unraveled_curve_to_image(
     draw,
     curve_color,
     shape_complexity: int,
+    shape_size: int,
     margin: int = 32,
     rng: np.random.Generator | None = None,
     width: int = 6,
+    min_angle_deg: float = 100.0,
 ):
+    """
     pts = generate_unraveled_open_path_points(
         image_size=image.size,
         num_points=shape_complexity,
@@ -576,6 +791,17 @@ def add_random_unraveled_curve_to_image(
         forward_min=0.25,
         repel_radius=22.0,
         end_far_fraction=0.55,
+        min_angle_deg=min_angle_deg,
+    )
+    """
+    pts = generate_open_curve_points(
+        image_size=image.size,
+        num_points=shape_complexity,
+        shape_size=shape_size,
+        wiggle_amp=0.4 * shape_size,
+        wiggle_smooth=0.15 * shape_complexity,
+        margin=margin,
+        rng=rng,
     )
     draw_open_curve(draw, pts, color=curve_color, width=width, samples_per_seg=25)
     return pts
@@ -589,7 +815,7 @@ def draw_shape(
     margin: int = 32,
     rng: np.random.Generator | None = None,
     width: int = 6,
-    shape_size: float = 100.0,
+    shape_size: float = 20.0,
 ):
     if rng is None:
         rng = np.random.default_rng()
@@ -649,6 +875,7 @@ def draw_shape(
             draw,
             curve_color=shape_color,
             shape_complexity=shape_complexity,
+            shape_size=shape_size,
             margin=margin,
             rng=rng,
             width=width,

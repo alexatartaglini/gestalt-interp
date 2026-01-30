@@ -25,7 +25,7 @@ def parse_arguments():
 
     parser.add_argument(
         "-dataset",
-        default="./cache/scrambled_objects",
+        default="./cache/scrambled_objects/test",
         type=str,
         help="Number of validation images to use",
     )
@@ -40,28 +40,26 @@ def parse_arguments():
     return args
 
 
-def cfg2labels(file, split, threshold=.5):
-    bg_patches = file["bg_patch_indices"] # 1 indexed to account for cls token
-    obj_patches = file["object_patch_indices"]
+def cfg2labels(file):
+    obj1_patches = file["object1_patch_indices"]
+    obj2_patches = file["object2_patch_indices"]
 
-    obj_patch_percentages = file["base_patch_shape_frac"] if split in ["base", "orientation"] else file["location_patch_shape_frac"]
+    bg_patches = file["bg_patch_indices"]
 
-    filtered_object_patches = []
-    filtered_bg_patches = list(bg_patches)
+    total_patches = np.max(obj1_patches + obj2_patches + bg_patches)
 
-    # If object patch is more than threshold, keep it for labeling
-    for obj_patch in obj_patches:
-        if obj_patch_percentages[obj_patch] > threshold:
-            filtered_object_patches.append(obj_patch)
-        else:
-            filtered_bg_patches.append(obj_patch)
+    # Ensure no overlapping patches!
+    filtered_obj1_patches = list(set(obj1_patches) - set(obj2_patches))
+    filtered_obj2_patches = list(set(obj2_patches) - set(obj1_patches))
 
-    bg_patches = [idx - 1 for idx in filtered_bg_patches]
-    obj_patches = [idx - 1 for idx in filtered_object_patches]
+    # 0 index, getting rid of CLS token
+    obj1_patches = [idx - 1 for idx in filtered_obj1_patches] 
+    obj2_patches = [idx - 1 for idx in filtered_obj2_patches]
 
-    total_patches = np.max(bg_patches + obj_patches) + 1
     obj_mask = np.zeros(total_patches)
-    obj_mask[obj_patches] = 1 # mask segmenting object from background
+    obj_mask[obj1_patches] = 1 # mask segmenting object 1 from background
+    obj_mask[obj2_patches] = 2 # mask segmenting object 2 from background
+
     return torch.Tensor(obj_mask)
 
 
@@ -92,38 +90,20 @@ def process_dataset(args, split, processor, model, probe):
             img_path = os.path.join(args.dataset, datum, f"{split}_PATCHSIZE-{patch_size}.png")
         cfg_path = os.path.join(args.dataset, datum, f"cfg_PATCHSIZE-{patch_size}.yaml")
 
-        labels = cfg2labels(yaml.safe_load(open(cfg_path, "r")), split)
         hidden_states = img2states(Image.open(img_path).convert("RGB"), processor, model, args.layer)
 
-        # Filter out background-background pairs
-        # Filter to balance object-object and object-background pairs
-        labels0 = labels.bool().unsqueeze(0)
-        labels1 = labels.bool().unsqueeze(1)
+        labels = cfg2labels(yaml.safe_load(open(cfg_path, "r")))
+        pairwise_labels = (labels.unsqueeze(0) == labels.unsqueeze(1))
 
-        oo = (labels0 & labels1)    # both object
-        bb = (~labels0 & ~labels1)   # both background
-        mix = ~(oo | bb)    # one obj, one bg
+        # mask out any pair where either element is background
+        valid_mask = (labels.unsqueeze(0) != 0) & (labels.unsqueeze(1) != 0)
+        pairwise_labels = pairwise_labels[valid_mask].reshape(-1).float()
 
-        oo_idx = oo.reshape(-1).nonzero(as_tuple=False).squeeze(1)
-        mix_idx = mix.reshape(-1).nonzero(as_tuple=False).squeeze(1)
-
-        k = min(oo_idx.numel(), mix_idx.numel())
-
-        if k == 0:
-            continue
-
-        # random sample without replacement
-        perm_oo = torch.randperm(oo_idx.numel(), device="cpu")[:k]
-        perm_mx = torch.randperm(mix_idx.numel(), device="cpu")[:k]
-        idxs = torch.cat([oo_idx[perm_oo], mix_idx[perm_mx]], dim=0)
- 
-        pairwise_labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).reshape(-1).float()
-
-        logits = probe.forward(hidden_states, hidden_states).reshape(-1)
+        logits = probe.forward(hidden_states, hidden_states)[valid_mask].reshape(-1)
         predictions = torch.sigmoid(logits) > 0.5
 
-        probe_acc.append(torch.mean((predictions.cpu()[idxs] == pairwise_labels[idxs]).float().detach()).item())
-        chance_diff_object.append(torch.mean((pairwise_labels[idxs] == 0).float()).item())
+        probe_acc.append(torch.mean((predictions.cpu() == pairwise_labels.bool()).float().detach()).item())
+        chance_diff_object.append(torch.mean((pairwise_labels == 0).float()).item())
     return np.mean(probe_acc), np.mean(chance_diff_object)
 
 

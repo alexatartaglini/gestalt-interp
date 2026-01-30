@@ -44,7 +44,7 @@ def parse_arguments():
 
     parser.add_argument(
         "-step_size",
-        default=4
+        default=8
     )
 
     parser.add_argument(
@@ -54,7 +54,7 @@ def parse_arguments():
 
     parser.add_argument(
         "-max_epochs",
-        default=8
+        default=16
     )
 
     parser.add_argument("-layer", default=10, type=int, help="layer to train probe on")
@@ -89,24 +89,30 @@ def train_probe(args, probe_size, trainloader, valloader):
         for hidden_states, labels in tqdm(trainloader):
             optimizer.zero_grad()
             hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
-            labels = labels.to("cuda").to(dtype=torch.bfloat16)
+
+            labels = labels.to("cuda")
+            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+
+            # mask out any pair where either element is background
+            valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
+            pairwise_labels = pairwise_labels[valid_mask].reshape(-1).float()
 
             # Compute pairwise probe results
             pairwise_matrices = []
             for batch_item in hidden_states:
                 pairwise_matrices.append(probe.forward(batch_item, batch_item))
 
-            outputs = torch.stack(pairwise_matrices, dim=0).reshape(-1)
+            outputs = torch.stack(pairwise_matrices, dim=0)[valid_mask].reshape(-1)
             predictions = torch.sigmoid(outputs) > 0.5
-            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2)).reshape(-1).float()
+
 
             loss = criterion(outputs, pairwise_labels)
             loss.backward()
 
             optimizer.step()
 
-            epoch_train_correct.append((predictions == pairwise_labels).detach().cpu().numpy())
-            epoch_train_loss.append(loss.detach().cpu().numpy() / len(hidden_states))
+            epoch_train_correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+            epoch_train_loss.append(loss.detach().cpu().numpy())
 
         scheduler.step()
 
@@ -115,20 +121,25 @@ def train_probe(args, probe_size, trainloader, valloader):
         with torch.no_grad():
             for hidden_states, labels in tqdm(valloader):
                 hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
-                labels = labels.to("cuda").to(dtype=torch.bfloat16)
+
+                labels = labels.to("cuda")
+                pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+
+                # mask out any pair where either element is background
+                valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
+                pairwise_labels = pairwise_labels[valid_mask].reshape(-1).float()
 
                 # Compute pairwise probe results
                 pairwise_matrices = []
                 for batch_item in hidden_states:
                     pairwise_matrices.append(probe.forward(batch_item, batch_item))
 
-                outputs = torch.stack(pairwise_matrices, dim=0).reshape(-1)
+                outputs = torch.stack(pairwise_matrices, dim=0)[valid_mask].reshape(-1)
                 predictions = torch.sigmoid(outputs) > 0.5
-                pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2)).reshape(-1).float()
 
                 loss = criterion(outputs, pairwise_labels)
-                epoch_val_correct.append((predictions == pairwise_labels).detach().cpu().numpy())
-                epoch_val_loss.append(loss.detach().cpu().numpy() / len(hidden_states))
+                epoch_val_correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+                epoch_val_loss.append(loss.detach().cpu().numpy())
         
         results["epoch"].append(epoch)
         results["train loss"].append(float(np.mean(epoch_train_loss)))
@@ -154,20 +165,24 @@ def eval_probe(probe, testloader):
         correct = []
         for hidden_states, labels in tqdm(testloader):
             hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
-            labels = labels.to("cuda").to(dtype=torch.bfloat16)
+            labels = labels.to("cuda")
+            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+
+            # mask out any pair where either element is background
+            valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
+            pairwise_labels = pairwise_labels[valid_mask].reshape(-1).float()
 
             # Compute pairwise probe results
             pairwise_matrices = []
             for batch_item in hidden_states:
                 pairwise_matrices.append(probe.forward(batch_item, batch_item))
 
-            outputs = torch.stack(pairwise_matrices, dim=0).reshape(-1)
+            outputs = torch.stack(pairwise_matrices, dim=0)[valid_mask].reshape(-1)
             predictions = torch.sigmoid(outputs) > 0.5
-            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2)).reshape(-1).float()
 
             loss = criterion(outputs, pairwise_labels)
-            correct.append((predictions == pairwise_labels).detach().cpu().numpy())
-            mean_loss.append(loss.detach().cpu().numpy() / len(hidden_states))
+            correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+            mean_loss.append(loss.detach().cpu().numpy())
         
         results["loss"].append(float(np.mean(mean_loss)))
         results["acc"].append(float(np.concatenate(correct).mean()))

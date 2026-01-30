@@ -1,1 +1,1 @@
-{"model": "facebook/dinov2-base", "num_training_images": 20000, "num_val_images": 128, "batch_size": 128, "num_sample_patches": 64, "layer": 10, "outfolder": "./cache", "random_seed": 19}
+{"model": "facebook/dinov2-base", "dataset": "./cache/scrambled_objects", "layer": 10, "outfolder": "./cache", "random_seed": 19}

@@ -1,6 +1,9 @@
 import argparse
 import os
 import json
+import yaml
+
+from PIL import Image
 
 import numpy as np
 
@@ -26,29 +29,9 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "-num_training_images",
-        default=20000,
-        type=int,
-        help="Number of training images to use",
-    )
-
-    parser.add_argument(
-        "-num_val_images",
-        default=128,
-        type=int,
-        help="Number of validation images to use",
-    )
-
-    parser.add_argument(
-        "-batch_size",
-        default=128,
-        type=int,
-    )
-
-    parser.add_argument(
-        "-num_sample_patches",
-        default=64,
-        help="Sample a random number N of patches per image to supervise probe"
+        "-dataset",
+        default="./cache/scrambled_objects",
+        type=str,
     )
 
     parser.add_argument("-layer", default=10, type=int, help="layer to train probe on")
@@ -66,59 +49,68 @@ def parse_arguments():
     return args
 
 
-def featurize_data(args, processor, model, dataloader):
-    
+def cfg2labels(file):
+    obj1_patches = file["object1_patch_indices"]
+    obj2_patches = file["object2_patch_indices"]
+
+    bg_patches = file["bg_patch_indices"]
+
+    total_patches = np.max(obj1_patches + obj2_patches + bg_patches)
+
+    # Ensure no overlapping patches!
+    filtered_obj1_patches = list(set(obj1_patches) - set(obj2_patches))
+    filtered_obj2_patches = list(set(obj2_patches) - set(obj1_patches))
+
+    # 0 index, getting rid of CLS token
+    obj1_patches = [idx - 1 for idx in filtered_obj1_patches] 
+    obj2_patches = [idx - 1 for idx in filtered_obj2_patches]
+
+    obj_mask = np.zeros(total_patches)
+    obj_mask[obj1_patches] = 1 # mask segmenting object 1 from background
+    obj_mask[obj2_patches] = 2 # mask segmenting object 2 from background
+
+    return torch.Tensor(obj_mask)
+
+
+def img2states(img, processor, model, layer):
+    inputs = processor(img, return_tensors="pt")
+    inputs = {k: v.cuda().to(dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    with torch.no_grad():  # Ensure no gradients are computed
+        hidden_states = model(**inputs, output_hidden_states=True).hidden_states[layer+1]
+    return hidden_states[0, 1:, :]  # Always only one image here
+
+def process_dataset(args, split, processor, model):
+
+    patch_size = model.config.patch_size
+    model.eval()
+
+    dataset = os.path.join(args.dataset, split)
+
+    data = os.listdir(dataset)
+
     labels = []
     hidden_states = []
-    model.eval()
-    with torch.no_grad():  # Disable gradient computation to save memory
-        for images, segmentation_masks in tqdm(dataloader):
-            batch_hidden_states = utils.processing.get_hidden_states(model, processor, images, args.layer)
-            batch_labels = utils.processing.extract_patch_labels(model.config.patch_size, np.stack(segmentation_masks, axis=0))
 
-            sampled_indices = np.random.choice(batch_labels.shape[1], size=args.num_sample_patches, replace=False)
-            
-            batch_hidden_states = batch_hidden_states[:, sampled_indices].detach().to("cpu").to(dtype=torch.bfloat16)
-            batch_labels = batch_labels[:, sampled_indices].detach().to("cpu").to(dtype=torch.bfloat16)
+    for datum in tqdm(data):
+        if datum == "cfg.yaml":
+            continue
 
-            labels.append(batch_labels)
-            hidden_states.append(batch_hidden_states)
-            
-            # Clear GPU cache periodically to prevent fragmentation
-            if len(labels) % 50 == 0:
-                torch.cuda.empty_cache()
+        img_path = os.path.join(dataset, datum, "base.png")
+        cfg_path = os.path.join(dataset, datum, f"cfg_PATCHSIZE-{patch_size}.yaml")
 
-    return torch.concat(hidden_states, dim=0), torch.concat(labels, dim=0)
+        labels.append(cfg2labels(yaml.safe_load(open(cfg_path, "r"))))
+        hidden_states.append(img2states(Image.open(img_path).convert("RGB"), processor, model, args.layer))
+
+    return torch.stack(hidden_states, dim=0).cpu(), torch.stack(labels, dim=0)
 
 
 if __name__ == "__main__":
     # Parse Args
     args = parse_arguments()
 
-    np.random.seed(args.random_seed)
     # Load up model and image preprocessor
     processor = AutoImageProcessor.from_pretrained(args.model)
-    model = AutoModel.from_pretrained(args.model).eval().to("cuda").to(dtype=torch.bfloat16)
-
-    dataset = utils.dataset.ADE20KSegmentation(
-        cache="./cache", image_set="train", max_examples=None, processor=processor
-    )
-    testset = utils.dataset.ADE20KSegmentation(
-        cache="./cache", image_set="validation", max_examples=None, processor=processor
-    )
-
-    set_indices = np.random.choice(range(len(dataset)), size=args.num_training_images + args.num_val_images, replace=False)
-    trainset = Subset(dataset, set_indices[:args.num_training_images])
-    valset = Subset(dataset, set_indices[args.num_training_images:])
-
-    trainloader = DataLoader(trainset, batch_size = args.batch_size, shuffle = False, collate_fn=utils.dataset.collate_fn, num_workers=8, pin_memory=True)
-    valloader = DataLoader(valset, batch_size = args.batch_size, shuffle = False, collate_fn=utils.dataset.collate_fn, num_workers=8, pin_memory=True)
-    testloader = DataLoader(testset, batch_size = args.batch_size, shuffle = False, collate_fn=utils.dataset.collate_fn, num_workers=8, pin_memory=True)
-
-    train_features, train_labels = featurize_data(args, processor, model, trainloader)
-    print(train_features.shape, train_labels.shape)
-    val_features, val_labels = featurize_data(args, processor, model, valloader)
-    test_features, test_labels = featurize_data(args, processor, model, testloader)
+    model = AutoModel.from_pretrained(args.model).eval().to("cuda").to(dtype=torch.bfloat16)        
 
     output_dir = os.path.join(args.outfolder, args.model, str(args.layer))
     os.makedirs(output_dir, exist_ok=True)
@@ -126,6 +118,10 @@ if __name__ == "__main__":
     args_dict = vars(args)
     with open(os.path.join(output_dir, "args.json"), "w") as f:
         json.dump(args_dict, f)
+
+    train_features, train_labels = process_dataset(args, "train", processor, model)
+    val_features, val_labels = process_dataset(args, "val", processor, model)
+    test_features, test_labels = process_dataset(args, "test", processor, model)
 
     torch.save(train_features, os.path.join(output_dir, "train_features.pth"))
     torch.save(val_features, os.path.join(output_dir, "val_features.pth"))

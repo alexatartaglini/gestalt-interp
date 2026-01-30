@@ -1,0 +1,1 @@
+{"model": "facebook/dinov2-base", "batch_size": 256, "lr": 0.001, "step_size": 4, "scheduler_gamma": 0.2, "max_epochs": 8, "layer": 11, "outfolder": "./results"}

@@ -7,10 +7,10 @@ from PIL import Image
 import numpy as np
 
 import torch
-from transformers import AutoImageProcessor, AutoModel
 
 from tqdm import tqdm
 from utils.probe import QuadraticProbe
+from utils.model_utils import Model
 
 def parse_arguments():
 
@@ -18,23 +18,49 @@ def parse_arguments():
     parser.add_argument(
         "-m",
         "--model",
-        default="facebook/dinov2-base",
+        default="dinov2",
         help="Model to use as backbone for analysis",
     )
 
+    parser.add_argument(
+        "--patch_size",
+        default=14,
+        type=int,
+        help="Patch size for model",
+    )
 
     parser.add_argument(
         "-dataset",
         default="./cache/scrambled_objects/test",
         type=str,
-        help="Number of validation images to use",
+        help="The directory containing test objects",
     )
+
+    parser.add_argument("--probe_path", default="facebook/dinov2-base")
 
     parser.add_argument("-layer", default=10, type=int, help="layer to train probe on")
 
     parser.add_argument(
         "-outfolder", default="./results", type=str, help="Directory to store results"
     )
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Enable head ablation"
+    )
+
+    parser.add_argument(
+        "--ablate_all",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--ablation_heads",
+        nargs="+",
+        default=["6_8", "8_8"],
+        type=str,
+        help="A list of Layer_Head-Index strings to ablate"
+    )
+
 
     args = parser.parse_args()
     return args
@@ -63,16 +89,17 @@ def cfg2labels(file):
     return torch.Tensor(obj_mask)
 
 
-def img2states(img, processor, model, layer):
-    inputs = processor(img, return_tensors="pt")
-    inputs = {k: v.cuda().to(dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-    with torch.no_grad():  # Ensure no gradients are computed
-        hidden_states = model(**inputs, output_hidden_states=True).hidden_states[layer+1]
-    return hidden_states[0, 1:, :]  # Always only one image here
+def img2states(img, model, layer, ablation, head_str=None):
+    if not ablation:
+        _, cache = model.run_with_cache(img)
+    else:
+        _, cache = model.run_with_head_ablation(img, head_str)
+    return cache[f"blocks.{layer}.hook_resid_post"][0, 1:, :]
 
-def process_dataset(args, split, processor, model, probe):
 
-    patch_size = model.config.patch_size
+def process_dataset(args, split, model, probe, head=None):
+
+    patch_size = model.model.cfg.patch_size
     model.eval()
 
     data = os.listdir(args.dataset)
@@ -90,7 +117,7 @@ def process_dataset(args, split, processor, model, probe):
             img_path = os.path.join(args.dataset, datum, f"{split}_PATCHSIZE-{patch_size}.png")
         cfg_path = os.path.join(args.dataset, datum, f"cfg_PATCHSIZE-{patch_size}.yaml")
 
-        hidden_states = img2states(Image.open(img_path).convert("RGB"), processor, model, args.layer)
+        hidden_states = img2states(Image.open(img_path).convert("RGB"), model, args.layer, args.ablation, head_str=head)
 
         labels = cfg2labels(yaml.safe_load(open(cfg_path, "r")))
         pairwise_labels = (labels.unsqueeze(0) == labels.unsqueeze(1))
@@ -112,24 +139,46 @@ if __name__ == "__main__":
     args = parse_arguments()
 
     # Load up model and image preprocessor
-    processor = AutoImageProcessor.from_pretrained(args.model)
-    model = AutoModel.from_pretrained(args.model).eval().to("cuda").to(dtype=torch.bfloat16)
-
-    probe = QuadraticProbe(model.config.hidden_size)
-    probe_state_dict = torch.load(f"./results/{args.model}/{args.layer}/probe.pth")
-    probe.load_state_dict(probe_state_dict)
-    probe.eval().to("cuda").to(dtype=torch.bfloat16)
-
-
-    results = {}
-    for dataset in ["base", "location", "orientation"]:
-        accuracy, chance_diff_object = process_dataset(args, dataset, processor, model, probe)
-        results[dataset] = accuracy
-        results["chance_diff_object"] = chance_diff_object
-        print(results)
-
-    output_dir = os.path.join(args.outfolder, args.model, str(args.layer))
-    os.makedirs(output_dir, exist_ok=True)
+    model = Model(
+                pretrain=args.model,  # imagenet, dinov2, scratch
+                patch_size=args.patch_size,  # 14 for dinov2; 16 or 32 for clip/imagenet
+            )
+    model.to("cuda")
     
-    with open(os.path.join(output_dir, "gestalt_eval.json"), "w") as f:
-        json.dump(results, f)
+    probe = QuadraticProbe(model.model.cfg.d_model)
+    probe_state_dict = torch.load(f"./results/{args.probe_path}/{args.layer}/probe.pth")
+    probe.load_state_dict(probe_state_dict)
+    probe.eval().to("cuda").to(dtype=torch.float32)
+
+
+    if args.ablation:
+        dataset_list = ["base"]
+
+        if args.ablate_all:
+            head_list = []
+            for i in range(12):
+                for j in range(12):
+                    head_list.append(f"{i}_{j}")
+        else:
+            head_list = args.ablation_heads
+
+    else:
+        head_list = [None]
+        dataset_list = ["base", "location", "orientation"]
+
+    for head in head_list:
+        results = {}
+        for dataset in dataset_list:
+            accuracy, chance_diff_object = process_dataset(args, dataset, model, probe, head=head)
+            results[dataset] = accuracy
+            results["chance_diff_object"] = chance_diff_object
+            print(results)
+
+        if args.ablation:
+            output_dir = os.path.join(args.outfolder, args.probe_path, str(args.layer), "ablation", head)
+        else:
+            output_dir = os.path.join(args.outfolder, args.probe_path, str(args.layer), "standard")
+
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "gestalt_eval.json"), "w") as f:
+            json.dump(results, f)

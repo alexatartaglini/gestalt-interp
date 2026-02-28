@@ -3,3 +3,5 @@ binding_probes/cache/1aurent___ade20_k
 *.pyc
 *.pth
 *.zip
+*/.locks/*
+binding_probes/models--facebook--dinov2-base/*

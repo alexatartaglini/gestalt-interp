@@ -260,6 +260,7 @@ def generate_radial_keypoints(
     # NEW knobs:
     fill_fraction: float = 0.98,      # how close to the max allowable radius we try to get
     radius_jitter: float = 0.18,      # variation around the target radius (0..~0.4 typical)
+    center_bounds: tuple[float, float] | None = None,
 ):
     """
     Generates keypoints that can expand up to the full available window (inside 'margin'),
@@ -278,17 +279,23 @@ def generate_radial_keypoints(
     # center is chosen so that a circle of radius half_target would fit *if possible*;
     # if shape_size is huge, we still keep center within margin-only safe window.
     # So: clamp half_target used for center sampling to at most what margins allow globally.
-    global_max_half = max(1.0, min((W - 2 * margin) / 2.0, (H - 2 * margin) / 2.0))
-    half_for_center = min(half_target, global_max_half)
+    if center_bounds is None:
+        global_max_half = max(1.0, min((W - 2 * margin) / 2.0, (H - 2 * margin) / 2.0))
+        half_for_center = min(half_target, global_max_half)
 
-    x_lo, x_hi = margin + half_for_center, W - margin - half_for_center
-    y_lo, y_hi = margin + half_for_center, H - margin - half_for_center
-    if x_lo >= x_hi or y_lo >= y_hi:
-        # If the image is tight, fall back to any center in the margin window.
-        x_lo, x_hi = margin, W - margin
-        y_lo, y_hi = margin, H - margin
+        x_lo, x_hi = margin + half_for_center, W - margin - half_for_center
+        y_lo, y_hi = margin + half_for_center, H - margin - half_for_center
         if x_lo >= x_hi or y_lo >= y_hi:
-            raise ValueError("image_size too small for given margin.")
+            # If the image is tight, fall back to any center in the margin window.
+            x_lo, x_hi = margin, W - margin
+            y_lo, y_hi = margin, H - margin
+            if x_lo >= x_hi or y_lo >= y_hi:
+                raise ValueError("image_size too small for given margin.")
+
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+        if x_lo >= x_hi or y_lo >= y_hi:
+            raise ValueError("center_bounds too small for given margin.")
 
     cx = float(rng.uniform(x_lo, x_hi))
     cy = float(rng.uniform(y_lo, y_hi))
@@ -426,6 +433,8 @@ def generate_unraveled_open_path_points(
 
     # safety:
     max_tries: int = 15000,
+
+    center_bounds: tuple[float, float] | None = None,
 ):
     """
     Open polyline that looks "unraveled":
@@ -440,10 +449,16 @@ def generate_unraveled_open_path_points(
         rng = np.random.default_rng()
 
     W, H = image_size
-    x_lo, x_hi = margin, W - margin
-    y_lo, y_hi = margin, H - margin
-    if x_lo >= x_hi or y_lo >= y_hi:
-        raise ValueError("image_size too small for given margin.")
+
+    if center_bounds is None:
+        x_lo, x_hi = margin, W - margin
+        y_lo, y_hi = margin, H - margin
+        if x_lo >= x_hi or y_lo >= y_hi:
+            raise ValueError("image_size too small for given margin.")
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+        if x_lo >= x_hi or y_lo >= y_hi:
+            raise ValueError("center_bounds too small for given margin.")
 
     # pick a global forward direction (unit vector)
     phi = float(rng.uniform(0, 2 * math.pi))
@@ -732,6 +747,7 @@ def add_random_blob_to_image(
     shape_complexity: int,
     margin: int = 32,
     rng: np.random.Generator | None = None,
+    center_bounds: tuple[float, float] | None = None,
 ):
     (W, H) = image.size
     center, keypoints = generate_radial_keypoints(
@@ -742,6 +758,7 @@ def add_random_blob_to_image(
         rng=rng,
         fill_fraction=0.99,     # push close to boundary
         radius_jitter=0.22,     # still “blobby”
+        center_bounds=center_bounds,
     )
     draw_blob(draw, keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
     return center, keypoints
@@ -755,6 +772,7 @@ def add_random_closed_curve_to_image(
     margin: int = 32,
     width: int = 6,
     rng: np.random.Generator | None = None,
+    center_bounds: tuple[float, float] | None = None,
 ):
     (W, H) = image.size
     center, keypoints = generate_radial_keypoints(
@@ -765,6 +783,7 @@ def add_random_closed_curve_to_image(
         rng=rng,
         fill_fraction=0.99,     # push close to boundary
         radius_jitter=0.22,     # still “blobby”
+        center_bounds=center_bounds,
     )
     draw_closed_curve(draw, keypoints, center, fill=shape_color, outline=shape_color, samples_per_seg=30, width=width)
     return center, keypoints
@@ -778,22 +797,8 @@ def add_random_unraveled_curve_to_image(
     margin: int = 32,
     rng: np.random.Generator | None = None,
     width: int = 6,
-    min_angle_deg: float = 100.0,
+    center_bounds: tuple[float, float] | None = None,
 ):
-    """
-    pts = generate_unraveled_open_path_points(
-        image_size=image.size,
-        num_points=shape_complexity,
-        margin=margin,
-        rng=rng,
-        step_range=(14.0, 36.0),
-        max_turn_deg=75.0,
-        forward_min=0.25,
-        repel_radius=22.0,
-        end_far_fraction=0.55,
-        min_angle_deg=min_angle_deg,
-    )
-    """
     pts = generate_open_curve_points(
         image_size=image.size,
         num_points=shape_complexity,
@@ -802,6 +807,7 @@ def add_random_unraveled_curve_to_image(
         wiggle_smooth=0.15 * shape_complexity,
         margin=margin,
         rng=rng,
+        center_bounds=center_bounds,
     )
     draw_open_curve(draw, pts, color=curve_color, width=width, samples_per_seg=25)
     return pts
@@ -816,16 +822,21 @@ def draw_shape(
     rng: np.random.Generator | None = None,
     width: int = 6,
     shape_size: float = 20.0,
+    center_bounds: tuple[float, float] | None = None,
 ):
     if rng is None:
         rng = np.random.default_rng()
+
+    W, H = image.size
     
     if shape_type == "circle" or shape_type == "square":
-        x_range = (32 + shape_size/2, image.size[0] - 32 - shape_size/2)
-        y_range = (32 + shape_size/2, image.size[1] - 32 - shape_size/2)
-
-        x_pos = rng.randint(x_range[0], x_range[1])
-        y_pos = rng.randint(y_range[0], y_range[1])
+        if center_bounds is None:
+            x_pos = rng.randint(32 + shape_size/2, W - 32 - shape_size/2)
+            y_pos = rng.randint(32 + shape_size/2, H - 32 - shape_size/2)
+        else:
+            (xmin, xmax), (ymin, ymax) = center_bounds
+            x_pos = rng.randint(xmin, xmax)
+            y_pos = rng.randint(ymin, ymax)
 
         if shape_type == "circle":
             draw.ellipse(
@@ -844,13 +855,23 @@ def draw_shape(
         short_size = rng.randint(int(shape_size//3), int(shape_size//2))
 
         if long_axis == "x":
-            x_range = (32 + shape_size/2, image.size[0] - 32 - shape_size/2)
-            y_range = (32 + short_size/2, image.size[1] - 32 - short_size/2)
+            if center_bounds is None:
+                x_range = (32 + shape_size/2, W - 32 - shape_size/2)
+                y_range = (32 + short_size/2, H - 32 - short_size/2)
+            else:
+                (xmin, xmax), (ymin, ymax) = center_bounds
+                x_range = (xmin, xmax)
+                y_range = (ymin, ymax)
             x_length = shape_size
             y_length = short_size
         else:
-            y_range = (32 + shape_size/2, image.size[1] - 32 - shape_size/2)
-            x_range = (32 + short_size/2, image.size[0] - 32 - short_size/2)
+            if center_bounds is None:
+                y_range = (32 + shape_size/2, H - 32 - shape_size/2)
+                x_range = (32 + short_size/2, W - 32 - short_size/2)
+            else:
+                (xmin, xmax), (ymin, ymax) = center_bounds
+                y_range = (ymin, ymax)
+                x_range = (xmin, xmax)
             x_length = short_size
             y_length = shape_size
 
@@ -879,6 +900,7 @@ def draw_shape(
             margin=margin,
             rng=rng,
             width=width,
+            center_bounds=center_bounds,
         )
     elif shape_type == "blob":
         add_random_blob_to_image(
@@ -889,6 +911,7 @@ def draw_shape(
             shape_complexity=shape_complexity,
             margin=margin,
             rng=rng,
+            center_bounds=center_bounds,
         )
     elif shape_type == "closedcurve":
         add_random_closed_curve_to_image(
@@ -900,6 +923,7 @@ def draw_shape(
             margin=margin,
             width=width,
             rng=rng,
+            center_bounds=center_bounds,
         )
     else:
         raise ValueError(f"Invalid shape type: {shape_type}")

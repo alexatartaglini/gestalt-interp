@@ -352,15 +352,11 @@ def generate_blob_keypoints(
     center_bounds: tuple[float, float] | None = None,
 ):
     """
-    Generates more varied closed blobs than the generic radial sampler.
+    Generates smooth, lobe-like closed blobs.
 
-    `shape_complexity` controls both:
-    - how many control points are used
-    - how rough / bumpy the radial profile is
-
-    The outline is built from a smooth random radial signal plus a few
-    sinusoidal harmonics, which gives a broader range of blob families
-    while preserving a simple closed contour.
+    `shape_complexity` increases both the number of large-scale lobes
+    and the amount of radius variation, so higher values produce more
+    distinct silhouettes instead of a near-circle with fine noise.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -368,7 +364,7 @@ def generate_blob_keypoints(
     W, H = image_size
     half_target = shape_size / 2.0
     complexity = max(3, int(shape_complexity))
-    complexity_scale = min(1.0, (complexity - 3) / 9.0)
+    complexity_scale = min(1.0, (complexity - 3) / 7.0)
 
     if center_bounds is None:
         global_max_half = max(1.0, min((W - 2 * margin) / 2.0, (H - 2 * margin) / 2.0))
@@ -394,40 +390,54 @@ def generate_blob_keypoints(
     max_allowed = max(1.0, float(max_allowed))
     base_r = min(half_target, max_allowed) * float(fill_fraction)
 
-    min_points = max(6, complexity + 2)
-    max_points = max(min_points + 1, 2 * complexity + 6)
+    min_points = max(12, complexity * 2 + 4)
+    max_points = max(min_points + 1, complexity * 3 + 10)
     num_points = _rng_integers(rng, min_points, max_points + 1)
 
+    lobe_min = 3
+    lobe_max = max(lobe_min + 1, min(9, complexity + 2))
+    num_lobes = _rng_integers(rng, lobe_min, lobe_max + 1)
+
+    anchor_step = (2.0 * np.pi) / num_lobes
+    anchor_angles = np.linspace(0.0, 2.0 * np.pi, num_lobes, endpoint=False)
+    anchor_jitter = rng.uniform(-0.35 * anchor_step, 0.35 * anchor_step, size=num_lobes)
+    anchor_angles = np.sort((anchor_angles + anchor_jitter) % (2.0 * np.pi))
+
+    min_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [0.6, 0.3])
+    max_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [1.15, 1.45])
+    anchor_radii = base_r * rng.uniform(min_radius_scale, max_radius_scale, size=num_lobes)
+
+    # Force a few prominent large-scale bulges and dents so shapes are
+    # visibly different rather than gently perturbed circles.
+    num_emphasis = min(num_lobes, _rng_integers(rng, 1, 3 + max(1, complexity // 4)))
+    emphasis_idx = rng.choice(num_lobes, size=num_emphasis, replace=False)
+    for idx in np.atleast_1d(emphasis_idx):
+        if rng.uniform() < 0.55:
+            anchor_radii[idx] *= rng.uniform(1.08, np.interp(complexity_scale, [0.0, 1.0], [1.18, 1.35]))
+        else:
+            anchor_radii[idx] *= rng.uniform(np.interp(complexity_scale, [0.0, 1.0], [0.72, 0.45]), 0.92)
+
     base_angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
-    max_ang_jitter = np.interp(complexity_scale, [0.0, 1.0], [0.2, 0.85]) * (2.0 * np.pi / num_points)
+    wrapped_anchor_angles = np.concatenate([anchor_angles, anchor_angles[:1] + 2.0 * np.pi])
+    wrapped_anchor_radii = np.concatenate([anchor_radii, anchor_radii[:1]])
+    radii = np.interp(base_angles, wrapped_anchor_angles, wrapped_anchor_radii)
+
+    # A low-frequency anisotropy term helps move the family away from
+    # "circle plus noise" toward genuinely different silhouettes.
+    anisotropy = np.zeros(num_points, dtype=float)
+    for freq in (2, 3):
+        phase = float(rng.uniform(0.0, 2.0 * np.pi))
+        amp = rng.uniform(0.04, np.interp(complexity_scale, [0.0, 1.0], [0.12, 0.2]))
+        anisotropy += amp * np.sin(freq * base_angles + phase)
+    radii = radii * (1.0 + anisotropy)
+
+    smooth_sigma = np.interp(complexity_scale, [0.0, 1.0], [num_points / 7.5, num_points / 11.0])
+    radii = gaussian_filter1d(radii, sigma=max(1.0, smooth_sigma), mode="wrap")
+    radii = np.clip(radii, base_r * 0.22, max_allowed * 0.999)
+
+    max_ang_jitter = np.interp(complexity_scale, [0.0, 1.0], [0.08, 0.18]) * (2.0 * np.pi / num_points)
     angle_jitter = rng.uniform(-max_ang_jitter, max_ang_jitter, size=num_points)
     angles = np.sort((base_angles + angle_jitter) % (2.0 * np.pi))
-
-    radial_noise = rng.normal(0.0, 1.0, size=num_points)
-    sigma = np.interp(complexity_scale, [0.0, 1.0], [num_points / 3.2, max(1.0, num_points / 10.0)])
-    radial_noise = gaussian_filter1d(radial_noise, sigma=sigma, mode="wrap")
-    radial_noise -= radial_noise.mean()
-    max_abs_noise = np.max(np.abs(radial_noise))
-    if max_abs_noise > 1e-6:
-        radial_noise /= max_abs_noise
-
-    harmonic_profile = np.zeros(num_points, dtype=float)
-    num_harmonics = _rng_integers(rng, 1, 2 + max(1, complexity // 3))
-    max_frequency = max(2, min(num_points // 2, complexity + 2))
-    sample_idx = np.arange(num_points)
-    for _ in range(num_harmonics):
-        freq = _rng_integers(rng, 2, max_frequency + 1)
-        phase = float(rng.uniform(0.0, 2.0 * np.pi))
-        amplitude = float(rng.uniform(0.2, 1.0)) / math.sqrt(freq)
-        harmonic_profile += amplitude * np.sin((2.0 * np.pi * freq * sample_idx / num_points) + phase)
-    max_abs_harmonic = np.max(np.abs(harmonic_profile))
-    if max_abs_harmonic > 1e-6:
-        harmonic_profile /= max_abs_harmonic
-
-    roughness = np.interp(complexity_scale, [0.0, 1.0], [0.12, 0.42])
-    radial_profile = 0.65 * radial_noise + 0.35 * harmonic_profile
-    radii = base_r * (1.0 + roughness * radial_profile)
-    radii = np.clip(radii, base_r * 0.45, max_allowed * 0.999)
 
     pts = []
     for a, r in zip(angles, radii):

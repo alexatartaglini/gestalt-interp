@@ -333,6 +333,104 @@ def generate_radial_keypoints(
     pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
     return center, pts
 
+def generate_blob_keypoints(
+    image_size,
+    shape_size: float,
+    shape_complexity: int,
+    margin: int = 32,
+    rng: np.random.Generator | None = None,
+    fill_fraction: float = 0.99,
+    center_bounds: tuple[float, float] | None = None,
+):
+    """
+    Generates more varied closed blobs than the generic radial sampler.
+
+    `shape_complexity` controls both:
+    - how many control points are used
+    - how rough / bumpy the radial profile is
+
+    The outline is built from a smooth random radial signal plus a few
+    sinusoidal harmonics, which gives a broader range of blob families
+    while preserving a simple closed contour.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    W, H = image_size
+    half_target = shape_size / 2.0
+    complexity = max(3, int(shape_complexity))
+    complexity_scale = min(1.0, (complexity - 3) / 9.0)
+
+    if center_bounds is None:
+        global_max_half = max(1.0, min((W - 2 * margin) / 2.0, (H - 2 * margin) / 2.0))
+        half_for_center = min(half_target, global_max_half)
+
+        x_lo, x_hi = margin + half_for_center, W - margin - half_for_center
+        y_lo, y_hi = margin + half_for_center, H - margin - half_for_center
+        if x_lo >= x_hi or y_lo >= y_hi:
+            x_lo, x_hi = margin, W - margin
+            y_lo, y_hi = margin, H - margin
+            if x_lo >= x_hi or y_lo >= y_hi:
+                raise ValueError("image_size too small for given margin.")
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+        if x_lo >= x_hi or y_lo >= y_hi:
+            raise ValueError("center_bounds too small for given margin.")
+
+    cx = float(rng.uniform(x_lo, x_hi))
+    cy = float(rng.uniform(y_lo, y_hi))
+    center = (cx, cy)
+
+    max_allowed = min(cx - margin, (W - margin) - cx, cy - margin, (H - margin) - cy)
+    max_allowed = max(1.0, float(max_allowed))
+    base_r = min(half_target, max_allowed) * float(fill_fraction)
+
+    min_points = max(6, complexity + 2)
+    max_points = max(min_points + 1, 2 * complexity + 6)
+    num_points = int(rng.integers(min_points, max_points + 1))
+
+    base_angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
+    max_ang_jitter = np.interp(complexity_scale, [0.0, 1.0], [0.2, 0.85]) * (2.0 * np.pi / num_points)
+    angle_jitter = rng.uniform(-max_ang_jitter, max_ang_jitter, size=num_points)
+    angles = np.sort((base_angles + angle_jitter) % (2.0 * np.pi))
+
+    radial_noise = rng.normal(0.0, 1.0, size=num_points)
+    sigma = np.interp(complexity_scale, [0.0, 1.0], [num_points / 3.2, max(1.0, num_points / 10.0)])
+    radial_noise = gaussian_filter1d(radial_noise, sigma=sigma, mode="wrap")
+    radial_noise -= radial_noise.mean()
+    max_abs_noise = np.max(np.abs(radial_noise))
+    if max_abs_noise > 1e-6:
+        radial_noise /= max_abs_noise
+
+    harmonic_profile = np.zeros(num_points, dtype=float)
+    num_harmonics = int(rng.integers(1, 2 + max(1, complexity // 3)))
+    max_frequency = max(2, min(num_points // 2, complexity + 2))
+    sample_idx = np.arange(num_points)
+    for _ in range(num_harmonics):
+        freq = int(rng.integers(2, max_frequency + 1))
+        phase = float(rng.uniform(0.0, 2.0 * np.pi))
+        amplitude = float(rng.uniform(0.2, 1.0)) / math.sqrt(freq)
+        harmonic_profile += amplitude * np.sin((2.0 * np.pi * freq * sample_idx / num_points) + phase)
+    max_abs_harmonic = np.max(np.abs(harmonic_profile))
+    if max_abs_harmonic > 1e-6:
+        harmonic_profile /= max_abs_harmonic
+
+    roughness = np.interp(complexity_scale, [0.0, 1.0], [0.12, 0.42])
+    radial_profile = 0.65 * radial_noise + 0.35 * harmonic_profile
+    radii = base_r * (1.0 + roughness * radial_profile)
+    radii = np.clip(radii, base_r * 0.45, max_allowed * 0.999)
+
+    pts = []
+    for a, r in zip(angles, radii):
+        x = cx + r * math.cos(a)
+        y = cy + r * math.sin(a)
+        x = float(np.clip(x, margin, W - margin))
+        y = float(np.clip(y, margin, H - margin))
+        pts.append((x, y))
+
+    pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+    return center, pts
+
 def generate_open_path_points(
     image_size,                  # (W,H)
     num_points: int,             # like "shape_complexity" for curves
@@ -750,14 +848,13 @@ def add_random_blob_to_image(
     center_bounds: tuple[float, float] | None = None,
 ):
     (W, H) = image.size
-    center, keypoints = generate_radial_keypoints(
+    center, keypoints = generate_blob_keypoints(
         image_size=(W, H),
         shape_size=shape_size,
         shape_complexity=shape_complexity,
         margin=margin,
         rng=rng,
-        fill_fraction=0.99,     # push close to boundary
-        radius_jitter=0.22,     # still “blobby”
+        fill_fraction=0.99,
         center_bounds=center_bounds,
     )
     draw_blob(draw, keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)

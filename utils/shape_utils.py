@@ -249,6 +249,15 @@ def _min_dist2_to_polyline(p, points):
         best = min(best, _dist2_point_to_segment(p, points[i], points[i + 1]))
     return best
 
+def _rng_integers(rng, low: int, high: int) -> int:
+    """
+    Compatibility wrapper for both numpy Generator and RandomState.
+    `high` is exclusive, matching Generator.integers / randint semantics.
+    """
+    if hasattr(rng, "integers"):
+        return int(rng.integers(low, high))
+    return int(rng.randint(low, high))
+
 ### POINT GENERATION FUNCTIONS
 
 def generate_radial_keypoints(
@@ -387,7 +396,7 @@ def generate_blob_keypoints(
 
     min_points = max(6, complexity + 2)
     max_points = max(min_points + 1, 2 * complexity + 6)
-    num_points = int(rng.integers(min_points, max_points + 1))
+    num_points = _rng_integers(rng, min_points, max_points + 1)
 
     base_angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
     max_ang_jitter = np.interp(complexity_scale, [0.0, 1.0], [0.2, 0.85]) * (2.0 * np.pi / num_points)
@@ -403,11 +412,11 @@ def generate_blob_keypoints(
         radial_noise /= max_abs_noise
 
     harmonic_profile = np.zeros(num_points, dtype=float)
-    num_harmonics = int(rng.integers(1, 2 + max(1, complexity // 3)))
+    num_harmonics = _rng_integers(rng, 1, 2 + max(1, complexity // 3))
     max_frequency = max(2, min(num_points // 2, complexity + 2))
     sample_idx = np.arange(num_points)
     for _ in range(num_harmonics):
-        freq = int(rng.integers(2, max_frequency + 1))
+        freq = _rng_integers(rng, 2, max_frequency + 1)
         phase = float(rng.uniform(0.0, 2.0 * np.pi))
         amplitude = float(rng.uniform(0.2, 1.0)) / math.sqrt(freq)
         harmonic_profile += amplitude * np.sin((2.0 * np.pi * freq * sample_idx / num_points) + phase)

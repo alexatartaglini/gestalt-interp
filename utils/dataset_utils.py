@@ -1,5 +1,6 @@
 import glob
 import os
+import random
 import shutil
 import copy
 from typing import Union
@@ -697,3 +698,487 @@ class ContinuityDataset(Dataset):
 
     def __len__(self):
         return len(self.subexperiment_paths)
+
+
+class ScrambledObjectDatasetConfig:
+    """
+    Stores axes of variation for a scrambled object dataset. 
+    """
+    def __init__(self, cfg: dict = {}):
+        self.dataset_root = cfg.get("dataset_root", "datasets")  ## Path to the dataset root
+        self.dataset_path = cfg.get("dataset_path", "default_dataset")  ## Path to the dataset
+        self.full_path = os.path.join(self.dataset_root, self.dataset_path)  ## Full path to the dataset
+        self.n_objects = cfg.get("n_objects", 2)
+        self.shape_types = cfg.get("shape_types", ["circle"])  ## List of shapes: "circle", "oval", "square", "rectangle", "blob", "closedcurve", "curve"
+        self.shape_complexities = cfg.get("shape_complexities", [10])  ## List of complexities for blobs and curves (i.e. # points)
+        self.shape_sizes = cfg.get("shape_sizes", [80, 115, 150])  ## List of sizes for shapes, lengths for curves
+        self.colors = cfg.get("colors", ["red", "blue", "green", "yellow", "purple", "orange", "brown", "pink", "gray", "black", "white"])  ## Possible shape & background colors
+        self.scrambling_types = cfg.get("scrambling_types", ["location", "orientation"])  ## Scrambling type: "location", "orientation"
+        self.image_size = cfg.get("image_size", (224, 224))  ## Size of the image
+        self.patch_sizes = cfg.get("patch_sizes", (14, 16, 32))
+        self.n_images = cfg.get("n_images", 1000)
+        self.n_test_images = cfg.get("n_test_images", 1000)
+        self.min_distance_px = cfg.get("min_distance_px", 0)
+        self.curve_width = cfg.get("curve_width", 6)
+        self.seed = cfg.get("seed", 42)
+
+        self.setup()
+
+    def setup(self):
+        if self.patch_sizes is None:
+            raise ValueError("patch_sizes cannot be None")
+        self.max_patch_size = max(self.patch_sizes)
+
+        if self.shape_types is None:
+            raise ValueError("shape_types cannot be None")
+        self.shape_types = self.shape_types if isinstance(self.shape_types, list) else [self.shape_types]
+
+        if self.shape_complexities is None:
+            self.shape_complexities = [None]
+        elif isinstance(self.shape_complexities, list):
+            self.shape_complexities = self.shape_complexities
+        else:
+            self.shape_complexities = [self.shape_complexities]
+        
+        if self.shape_sizes is None:
+            raise ValueError("shape_sizes cannot be None")
+        self.shape_sizes = self.shape_sizes if isinstance(self.shape_sizes, list) else [self.shape_sizes]
+
+        for shape_size in self.shape_sizes:
+            assert self.image_size[0] > 2*self.max_patch_size + shape_size, \
+                f"Image size {self.image_size} is too small for shape size {shape_size} and max patch size {self.max_patch_size}. Maximum shape size is {self.image_size[0] - 2*self.max_patch_size - 1}."
+            assert self.image_size[1] > 2*self.max_patch_size + shape_size, \
+                f"Image size {self.image_size} is too small for shape size {shape_size} and max patch size {self.max_patch_size}. Maximum shape size is {self.image_size[1] - 2*self.max_patch_size - 1}."
+
+        if self.colors is None:
+            raise ValueError("colors cannot be None")
+        self.colors = self.colors if isinstance(self.colors, list) else [self.colors]
+
+        if self.scrambling_types is None:
+            raise ValueError("scrambling_type cannot be None")
+        self.scrambling_types = self.scrambling_types if isinstance(self.scrambling_types, list) else [self.scrambling_types]
+        for scrambling_type in self.scrambling_types:
+            assert scrambling_type in ["location", "orientation"], "scrambling_type must be one of: location, orientation"
+
+
+class ScrambledObjectDataset(Dataset):
+    def __init__(self, cfg: Union[dict, ScrambledObjectDatasetConfig] = None):
+        self.cfg = cfg
+        if isinstance(cfg, dict):
+            self.cfg = ScrambledObjectDatasetConfig(self.cfg)
+
+        self.rng = np.random.RandomState(self.cfg.seed)
+
+        self.create()
+
+    @classmethod
+    def from_config(cls, cfg: Union[dict, ScrambledObjectDatasetConfig, str] = None, dataset_root: str = "datasets"):
+        if cfg is None:
+            cfg = ScrambledObjectDatasetConfig()
+        elif isinstance(cfg, str):
+            if "/" not in cfg:
+                cfg = f"{dataset_root}/{cfg}/cfg.yaml"
+            cfg = yaml.safe_load(open(cfg))
+            cfg = ScrambledObjectDatasetConfig(cfg)
+        elif isinstance(cfg, dict):
+            cfg = ScrambledObjectDatasetConfig(cfg)
+
+        return cls(cfg)
+
+    def _bbox_min_distance(self, a: np.ndarray, b: np.ndarray) -> float:
+        ya, xa = np.where(a)
+        yb, xb = np.where(b)
+
+        xa_min, xa_max = xa.min(), xa.max()
+        ya_min, ya_max = ya.min(), ya.max()
+        xb_min, xb_max = xb.min(), xb.max()
+        yb_min, yb_max = yb.min(), yb.max()
+
+        # horizontal gap
+        if xb_min > xa_max:
+            dx = xb_min - xa_max
+        elif xa_min > xb_max:
+            dx = xa_min - xb_max
+        else:
+            dx = 0  # overlap/projection overlap in x
+
+        # vertical gap
+        if yb_min > ya_max:
+            dy = yb_min - ya_max
+        elif ya_min > yb_max:
+            dy = ya_min - yb_max
+        else:
+            dy = 0
+
+        return (dx**2 + dy**2) ** 0.5
+    
+    def _segmentations_overlap(
+        self,
+        seg1: Image.Image,
+        seg2: Image.Image,
+        min_distance_px: int = 0,
+    ) -> bool:
+        """
+        Returns True if segmentations violate constraints:
+        - overlap
+        - OR are closer than min_distance_px
+
+        seg1, seg2: PIL Images in mode "1"
+        min_distance_px: minimum allowed pixel distance between objects
+        """
+        a = np.array(seg1, dtype=np.uint8)
+        b = np.array(seg2, dtype=np.uint8)
+
+        # 1. Hard overlap check
+        if np.logical_and(a, b).any():
+            return True
+
+        # 2. Distance constraint (optional)
+        if min_distance_px > 0:
+            # Distance from every pixel to nearest pixel of object 1
+            #dist_to_a = distance_transform_edt(~a)
+            # Find minimum distance from object 2 to object 1
+            #min_dist = dist_to_a[b].min()
+
+            bbox_dist = self._bbox_min_distance(a, b)
+
+            if bbox_dist < min_distance_px:
+                return True
+
+        return False
+
+    def _get_quadrant_bounds(self, quadrant):
+        W, H = self.cfg.image_size
+        mx = W // 2
+        my = H // 2
+        margin = self.cfg.max_patch_size
+
+        if quadrant == "tl":
+            return ((margin, mx - margin), (margin, my - margin))
+        if quadrant == "tr":
+            return ((mx + margin, W - margin), (margin, my - margin))
+        if quadrant == "bl":
+            return ((margin, mx - margin), (my + margin, H - margin))
+        if quadrant == "br":
+            return ((mx + margin, W - margin), (my + margin, H - margin))
+
+        raise ValueError(f"Unknown quadrant: {quadrant}")
+
+    def _get_object_patch_indices(
+        self,
+        im: Image.Image,
+        patch_size: int,
+    ):
+        if im.mode != "1":
+            raise ValueError(f"Expected mode '1', got {im.mode!r}")
+
+        W, H = im.size
+        if (W % patch_size) != 0 or (H % patch_size) != 0:
+            raise ValueError(f"Image size {(W, H)} must be divisible by patch_size={patch_size}")
+
+        arr = (np.array(im, dtype=np.uint8) > 0).astype(np.uint8)  # 0/1
+
+        npx = W // patch_size
+        npy = H // patch_size
+        n = npx * npy
+
+        patches = (
+            arr.reshape(npy, patch_size, npx, patch_size)
+            .transpose(0, 2, 1, 3)
+            .reshape(n, patch_size * patch_size)
+        )
+
+        has_one  = patches.any(axis=1)
+        has_zero = (~patches.astype(bool)).any(axis=1)
+
+        is_bg = has_zero & (~has_one)
+        is_shape = has_one
+
+        is_bg = (np.flatnonzero(is_bg.reshape(-1)) + 1).tolist()
+        is_shape = (np.flatnonzero(is_shape.reshape(-1)) + 1).tolist()
+
+        return npx, npy, is_bg, is_shape
+
+    def _create_segmentation(self, image, shape_color, bg_color):
+        shape_mask = Image.new("1", image.size)
+        shape_pixels = image.load()
+        mask_pixels = shape_mask.load()
+        for y in range(image.size[1]):
+            for x in range(image.size[0]):
+                if shape_pixels[x, y] == shape_color:
+                    mask_pixels[x, y] = 1
+                elif shape_pixels[x, y] == bg_color:
+                    mask_pixels[x, y] = 0
+        return shape_mask
+
+    def _finalize_two_object_image(
+        self, image, seg1, seg2,
+        aux_color, shape_color,
+        bg_color, bg_color_name, shape_color_name
+    ):
+        # recolor aux → shape
+        pixels = image.load()
+        W, H = image.size
+        for y in range(H):
+            for x in range(W):
+                if pixels[x, y] == aux_color:
+                    pixels[x, y] = shape_color
+
+        seg_all = self._create_segmentation(image, shape_color, bg_color)
+        scene_colors = (bg_color_name, shape_color_name)
+
+        return image, seg1, seg2, seg_all, scene_colors
+
+    def _create_image_and_segmentations(self, shape_type, shape_complexity, shape_size):
+        colors = self.cfg.colors
+
+        # --- choose colors ---
+        bg_color_name, shape_color_name = self.rng.choice(colors, size=2, replace=False)
+        bg_color_name = bg_color_name.item() if hasattr(bg_color_name, "item") else bg_color_name
+        shape_color_name = shape_color_name.item() if hasattr(shape_color_name, "item") else shape_color_name
+
+        remaining = [c for c in colors if c not in [bg_color_name, shape_color_name]]
+        if not remaining:
+            raise ValueError("Need ≥3 colors for two-object generation.")
+        aux_color_name = self.rng.choice(remaining)
+        aux_color_name = aux_color_name.item() if hasattr(aux_color_name, "item") else aux_color_name
+
+        bg_color   = self.color_name_to_rgb(bg_color_name)
+        shape_color = self.color_name_to_rgb(shape_color_name)
+        aux_color   = self.color_name_to_rgb(aux_color_name)
+
+        W, H = self.cfg.image_size
+        max_outer_tries = 50
+        max_inner_tries = 50
+
+        # ------------------------------------------------------------
+        # Phase 1: unconstrained resampling of object 1
+        # ------------------------------------------------------------
+        for _ in range(max_outer_tries):
+            image = Image.new("RGB", (W, H), bg_color)
+            draw = ImageDraw.Draw(image)
+
+            draw_shape(
+                shape_type, image, draw, shape_color,
+                shape_complexity, margin=self.cfg.max_patch_size,
+                width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
+            )
+            seg1 = self._create_segmentation(image, shape_color, bg_color)
+            image_obj1 = image.copy()
+
+            for _ in range(max_inner_tries):
+                image = image_obj1.copy()
+                draw = ImageDraw.Draw(image)
+
+                draw_shape(
+                    shape_type, image, draw, aux_color,
+                    shape_complexity, margin=self.cfg.max_patch_size,
+                    width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
+                )
+                seg2 = self._create_segmentation(image, aux_color, bg_color)
+
+                if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
+                    return self._finalize_two_object_image(
+                        image, seg1, seg2, aux_color, shape_color,
+                        bg_color, bg_color_name, shape_color_name
+                    )
+
+        # ------------------------------------------------------------
+        # Phase 2: quadrant-constrained fallback
+        # ------------------------------------------------------------
+        quadrants = ["tl", "tr", "bl", "br"]
+        self.rng.shuffle(quadrants)
+
+        quad = self.rng.choice(quadrants)
+        bounds = self._get_quadrant_bounds(quad)
+
+        image = Image.new("RGB", (W, H), bg_color)
+        draw = ImageDraw.Draw(image)
+
+        draw_shape(
+            shape_type, image, draw, shape_color,
+            shape_complexity, margin=self.cfg.max_patch_size,
+            width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
+            center_bounds=bounds
+        )
+        seg1 = self._create_segmentation(image, shape_color, bg_color)
+        image_obj1 = image.copy()
+
+        for _ in range(max_inner_tries):
+            image = image_obj1.copy()
+            draw = ImageDraw.Draw(image)
+
+            draw_shape(
+                shape_type, image, draw, aux_color,
+                shape_complexity, margin=self.cfg.max_patch_size,
+                width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
+                center_bounds=bounds
+            )
+            seg2 = self._create_segmentation(image, aux_color, bg_color)
+
+            if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
+                return self._finalize_two_object_image(
+                    image, seg1, seg2, aux_color, shape_color,
+                    bg_color, bg_color_name, shape_color_name
+                )
+
+        # ------------------------------------------------------------
+        # Hard failure (real config issue)
+        # ------------------------------------------------------------
+        raise RuntimeError(
+            "Could not place two non-overlapping objects after resampling "
+            "and quadrant-constrained fallback.\n"
+            "Try increasing image_size, decreasing shape_size, or increasing patch margin."
+        )
+
+    def _create_scrambled_image(self, image, scrambling_type, cfg):
+        """
+        Create a scrambled image where each object is scrambled within itself only.
+
+        - For 'location': patches of each object are shuffled among that object's patch set.
+        - For 'orientation': each patch in each object patch set is independently rotated.
+        """
+        patch_size = cfg["patch_size"]
+        object1_patch_indices = cfg["object1_patch_indices"]
+        object2_patch_indices = cfg["object2_patch_indices"]
+
+        if object1_patch_indices is None or object2_patch_indices is None:
+            raise ValueError(
+                "Expected cfg to contain 'object1_patch_indices' and 'object2_patch_indices'. "
+                "Make sure you re-generated the dataset with the updated create() logic."
+            )
+
+        scrambled_image = image.copy()
+
+        def scramble_patch_group(im, patch_indices):
+            # map patch index -> (x0, y0)
+            patch_to_image_coords = {}
+            patches = []
+
+            for patch_index in patch_indices:
+                patch_image_coords = patch_index_to_image_coords(
+                    patch_index,
+                    patch_size,
+                    im.size,
+                    one_indexed=True,
+                )[0]
+                patch_to_image_coords[patch_index] = patch_image_coords
+
+                x0, y0 = patch_image_coords
+                patch_box = (x0, y0, x0 + patch_size, y0 + patch_size)
+                patch = im.crop(box=patch_box)
+                patches.append(patch)
+
+            # scramble
+            if scrambling_type == "location":
+                random.shuffle(patches)
+            elif scrambling_type == "orientation":
+                for i, patch in enumerate(patches):
+                    rotation = self.rng.choice([90, 180, 270])
+                    patches[i] = patch.rotate(rotation)
+            else:
+                raise ValueError(f"Unknown scrambling_type: {scrambling_type}")
+
+            # paste back into the scrambled_image only within this group
+            for patch_index, patch in zip(patch_indices, patches):
+                x0, y0 = patch_to_image_coords[patch_index]
+                scrambled_image.paste(patch, box=(x0, y0))
+
+        # scramble each object independently
+        scramble_patch_group(image, object1_patch_indices)
+        scramble_patch_group(image, object2_patch_indices)
+
+        return scrambled_image
+    
+    def create(self, experiment_id_digits: int = 10):
+        os.makedirs(self.cfg.full_path, exist_ok=True)
+
+        yaml_cfg = copy.deepcopy(self.cfg.__dict__)
+        yaml_cfg["image_size"] = list(yaml_cfg["image_size"])
+        yaml_cfg["patch_sizes"] = list(yaml_cfg["patch_sizes"])
+        yaml.dump(yaml_cfg, open(os.path.join(self.cfg.full_path, "cfg.yaml"), "w"))
+
+        # Create experiments
+        shape_types = self.cfg.shape_types
+        shape_complexities = self.cfg.shape_complexities
+        shape_sizes = self.cfg.shape_sizes
+        scrambling_types = self.cfg.scrambling_types
+        n_images = self.cfg.n_images
+
+        experiment_paths = []
+        for i in tqdm.tqdm(range(n_images), desc="Creating dataset", total=n_images):
+            params = (
+                random.choice(shape_types),
+                random.choice(shape_complexities),
+                random.choice(shape_sizes),
+            )
+            eid = uuid.uuid4().hex[:experiment_id_digits]
+            while eid in experiment_paths:
+                eid = uuid.uuid4().hex[:experiment_id_digits]
+
+            experiment_path = os.path.join(self.cfg.full_path, eid)
+            os.makedirs(experiment_path, exist_ok=True)  # Create overall experiment directory
+
+            # NEW: two-object image + separate segmentations
+            image, seg1, seg2, seg_all, scene_colors = self._create_image_and_segmentations(
+                *params,
+            )
+
+            experiment_config = {
+                "seed": self.cfg.seed,
+                "shape_type": params[0],
+                "shape_complexity": params[1] if params[0] in ["blob", "curve", "closedcurve"] else None,
+                "shape_size": params[2],
+                "bg_color": scene_colors[0],
+                "shape_color": scene_colors[1],
+                "experiment_id": eid,
+                "num_patches_x": None,
+                "num_patches_y": None,
+                "object_patch_indices": None,   # union of both objects
+                "object1_patch_indices": None,  # new
+                "object2_patch_indices": None,  # new
+                "bg_patch_indices": None,
+                "patch_size": None,
+            }
+            image.save(os.path.join(experiment_path, "base.png"))
+
+            # Axes of variation: patch_size, target token, control type
+            for patch_size in self.cfg.patch_sizes:
+                # union segmentation: which patches contain any object pixels?
+                npx, npy, bg_union, shape_union = self._get_object_patch_indices(seg_all, patch_size)
+                # per-object segmentations: which patches belong to obj1 vs obj2?
+                _, _, _, obj1_patches = self._get_object_patch_indices(seg1, patch_size)
+                _, _, _, obj2_patches = self._get_object_patch_indices(seg2, patch_size)
+
+                cfg = copy.deepcopy(experiment_config)
+                cfg["num_patches_x"] = npx
+                cfg["num_patches_y"] = npy
+                cfg["object_patch_indices"] = shape_union          # union
+                cfg["object1_patch_indices"] = obj1_patches        # obj1 only
+                cfg["object2_patch_indices"] = obj2_patches        # obj2 only
+                cfg["bg_patch_indices"] = bg_union
+                cfg["patch_size"] = patch_size
+
+                yaml.dump(
+                    cfg,
+                    open(os.path.join(experiment_path, f"cfg_PATCHSIZE-{patch_size}.yaml"), "w")
+                )
+
+                if i < self.cfg.n_test_images:  # Create scrambled for test only
+                    for scrambling_type in scrambling_types:
+                        scrambled_image_path = os.path.join(
+                            experiment_path,
+                            f"{scrambling_type}_PATCHSIZE-{patch_size}.png"
+                        )
+                        scrambled_image = self._create_scrambled_image(image, scrambling_type, cfg)
+                        scrambled_image.save(scrambled_image_path)
+
+    def color_name_to_rgb(self, name):
+        r, g, b = to_rgb(name)  # returns floats in [0,1]
+        return tuple(int(255 * x) for x in (r, g, b))
+
+    def __getitem__(self, idx):
+        pass
+
+    def __len__(self):
+        pass

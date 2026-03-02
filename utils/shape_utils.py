@@ -352,11 +352,12 @@ def generate_blob_keypoints(
     center_bounds: tuple[float, float] | None = None,
 ):
     """
-    Generates smooth, lobe-like closed blobs.
+    Generates smooth closed blobs with broad, deep bumps.
 
-    `shape_complexity` increases both the number of large-scale lobes
-    and the amount of radius variation, so higher values produce more
-    distinct silhouettes instead of a near-circle with fine noise.
+    The contour is defined by a relatively small set of anchor points.
+    A few large-scale bulges and dents are applied across neighboring
+    anchors, then the spline in `draw_blob` smooths that coarse contour
+    into a blob with pronounced lobes instead of shallow perturbations.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -390,54 +391,53 @@ def generate_blob_keypoints(
     max_allowed = max(1.0, float(max_allowed))
     base_r = min(half_target, max_allowed) * float(fill_fraction)
 
-    min_points = max(12, complexity * 2 + 4)
-    max_points = max(min_points + 1, complexity * 3 + 10)
+    min_points = max(5, complexity + 1)
+    max_points = max(min_points + 1, complexity + 4)
     num_points = _rng_integers(rng, min_points, max_points + 1)
 
-    lobe_min = 3
-    lobe_max = max(lobe_min + 1, min(9, complexity + 2))
-    num_lobes = _rng_integers(rng, lobe_min, lobe_max + 1)
-
-    anchor_step = (2.0 * np.pi) / num_lobes
-    anchor_angles = np.linspace(0.0, 2.0 * np.pi, num_lobes, endpoint=False)
-    anchor_jitter = rng.uniform(-0.35 * anchor_step, 0.35 * anchor_step, size=num_lobes)
-    anchor_angles = np.sort((anchor_angles + anchor_jitter) % (2.0 * np.pi))
-
-    min_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [0.6, 0.3])
-    max_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [1.15, 1.45])
-    anchor_radii = base_r * rng.uniform(min_radius_scale, max_radius_scale, size=num_lobes)
-
-    # Force a few prominent large-scale bulges and dents so shapes are
-    # visibly different rather than gently perturbed circles.
-    num_emphasis = min(num_lobes, _rng_integers(rng, 1, 3 + max(1, complexity // 4)))
-    emphasis_idx = rng.choice(num_lobes, size=num_emphasis, replace=False)
-    for idx in np.atleast_1d(emphasis_idx):
-        if rng.uniform() < 0.55:
-            anchor_radii[idx] *= rng.uniform(1.08, np.interp(complexity_scale, [0.0, 1.0], [1.18, 1.35]))
-        else:
-            anchor_radii[idx] *= rng.uniform(np.interp(complexity_scale, [0.0, 1.0], [0.72, 0.45]), 0.92)
-
+    angle_step = (2.0 * np.pi) / num_points
     base_angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
-    wrapped_anchor_angles = np.concatenate([anchor_angles, anchor_angles[:1] + 2.0 * np.pi])
-    wrapped_anchor_radii = np.concatenate([anchor_radii, anchor_radii[:1]])
-    radii = np.interp(base_angles, wrapped_anchor_angles, wrapped_anchor_radii)
-
-    # A low-frequency anisotropy term helps move the family away from
-    # "circle plus noise" toward genuinely different silhouettes.
-    anisotropy = np.zeros(num_points, dtype=float)
-    for freq in (2, 3):
-        phase = float(rng.uniform(0.0, 2.0 * np.pi))
-        amp = rng.uniform(0.04, np.interp(complexity_scale, [0.0, 1.0], [0.12, 0.2]))
-        anisotropy += amp * np.sin(freq * base_angles + phase)
-    radii = radii * (1.0 + anisotropy)
-
-    smooth_sigma = np.interp(complexity_scale, [0.0, 1.0], [num_points / 7.5, num_points / 11.0])
-    radii = gaussian_filter1d(radii, sigma=max(1.0, smooth_sigma), mode="wrap")
-    radii = np.clip(radii, base_r * 0.22, max_allowed * 0.999)
-
-    max_ang_jitter = np.interp(complexity_scale, [0.0, 1.0], [0.08, 0.18]) * (2.0 * np.pi / num_points)
-    angle_jitter = rng.uniform(-max_ang_jitter, max_ang_jitter, size=num_points)
+    angle_jitter = rng.uniform(
+        -np.interp(complexity_scale, [0.0, 1.0], [0.18, 0.32]) * angle_step,
+        np.interp(complexity_scale, [0.0, 1.0], [0.18, 0.32]) * angle_step,
+        size=num_points,
+    )
     angles = np.sort((base_angles + angle_jitter) % (2.0 * np.pi))
+
+    min_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [0.7, 0.28])
+    max_radius_scale = np.interp(complexity_scale, [0.0, 1.0], [1.2, 1.55])
+    radii = base_r * rng.uniform(min_radius_scale, max_radius_scale, size=num_points)
+
+    # Apply broad dents/bulges across adjacent anchors so the silhouette
+    # gets deep lobes rather than tiny surface texture.
+    feature_count = min(num_points, _rng_integers(rng, 2, 3 + max(1, complexity // 3)))
+    for _ in range(feature_count):
+        center_idx = _rng_integers(rng, 0, num_points)
+        half_width = _rng_integers(rng, 1, min(3, max(2, num_points // 3)))
+        if rng.uniform() < 0.5:
+            strength = rng.uniform(
+                np.interp(complexity_scale, [0.0, 1.0], [0.18, 0.28]),
+                np.interp(complexity_scale, [0.0, 1.0], [0.32, 0.55]),
+            )
+        else:
+            strength = -rng.uniform(
+                np.interp(complexity_scale, [0.0, 1.0], [0.2, 0.3]),
+                np.interp(complexity_scale, [0.0, 1.0], [0.38, 0.62]),
+            )
+
+        for offset in range(-half_width, half_width + 1):
+            idx = (center_idx + offset) % num_points
+            distance = abs(offset) / max(1, half_width)
+            weight = 0.5 * (1.0 + math.cos(np.pi * distance))
+            radii[idx] *= (1.0 + strength * weight)
+
+    # Add a coarse anisotropy term so many samples become obviously
+    # elongated / lopsided rather than staying near-circular.
+    stretch_axis = float(rng.uniform(0.0, 2.0 * np.pi))
+    stretch_strength = rng.uniform(0.08, np.interp(complexity_scale, [0.0, 1.0], [0.18, 0.35]))
+    radii *= 1.0 + stretch_strength * np.cos(angles - stretch_axis)
+
+    radii = np.clip(radii, base_r * 0.16, max_allowed * 0.999)
 
     pts = []
     for a, r in zip(angles, radii):

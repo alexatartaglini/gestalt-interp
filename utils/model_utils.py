@@ -3,18 +3,23 @@ import torch
 
 sys.path.insert(1, "TransformerLens")
 from transformer_lens.HookedViT import HookedViT
-from transformers import AutoProcessor, AutoImageProcessor
+from transformer_lens.loading_from_pretrained import convert_vit_weights
+from transformers import AutoProcessor, AutoImageProcessor, ViTForImageClassification
 from transformers import logging
 logging.set_verbosity_error()
 
 
 pretrain_paths = {
+    "mae": "facebook/vit-mae-base",  # patch size = 16
+    "dino": "facebook/dino-vitb{patch_size}",
     "imagenet": "google/vit-base-patch{patch_size}-224-in21k",
     "clip": "openai/clip-vit-base-patch{patch_size}",
     "dinov2": "facebook/dinov2-large",
     "scratch": None,
 }
 pretrain_processor_classes = {
+    "mae": AutoImageProcessor,
+    "dino": AutoImageProcessor,
     "imagenet": AutoImageProcessor,
     "clip": AutoProcessor,
     "dinov2": AutoImageProcessor,
@@ -32,9 +37,9 @@ class Model:
         device="auto"
     ):
         '''
-        :param pretrain: "imagenet", "clip", "scratch", "dinov2", 
-        :param patch_size: 16, 32
-        :param scratch_architecture: "imagenet", "dinov2", "clip"
+        :param pretrain: "mae", "dino", "imagenet", "clip", "scratch", "dinov2", 
+        :param patch_size: 14, 16, 32
+        :param scratch_architecture: "mae", "dino", "imagenet", "dinov2", "clip"
         '''
         if pretrain is None:
             pretrain = "scratch"
@@ -49,11 +54,27 @@ class Model:
         pretrain_path = pretrain_paths[self.load_type].format(patch_size=patch_size)
         pretrain_processor_class = pretrain_processor_classes[pretrain]
 
-        self.model = HookedViT.from_pretrained(
-            pretrain_path,
-            cache_dir=cache_dir,
-            is_clip=pretrain == "clip",
-        )
+        if self.load_type in ["dino", "mae"]:
+            tl_path = pretrain_paths["imagenet"].format(patch_size=patch_size)
+
+            hf_model = ViTForImageClassification.from_pretrained(pretrain_path)
+
+            self.model = HookedViT.from_pretrained(
+                tl_path,
+                cache_dir=cache_dir,
+                is_clip=pretrain == "clip",
+            )
+
+            state_dict = convert_vit_weights(hf_model, self.model.cfg)
+            self.model.load_state_dict(state_dict, strict=False)
+
+            del hf_model
+        else:
+            self.model = HookedViT.from_pretrained(
+                pretrain_path,
+                cache_dir=cache_dir,
+                is_clip=pretrain == "clip",
+            )
         self.image_processor = pretrain_processor_class.from_pretrained(
             pretrain_path,
             cache_dir=cache_dir

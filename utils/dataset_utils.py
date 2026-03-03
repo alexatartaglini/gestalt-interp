@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 from matplotlib.colors import to_rgb
 
-from .shape_utils import draw_shape
+from .shape_utils import draw_shape, generate_blob_keypoints, draw_blob
 from .token_utils import patch_grid_labels_mode1, translation_dirs_and_neighbors_for_patch_size, patch_index_to_image_coords
 
 
@@ -929,6 +929,39 @@ class ScrambledObjectDataset(Dataset):
 
         return image, seg1, seg2, seg_all, scene_colors
 
+    def _sample_blob_center(self, keypoints, center, center_bounds=None):
+        W, H = self.cfg.image_size
+        margin = self.cfg.max_patch_size
+
+        rel_x = [x - center[0] for x, _ in keypoints]
+        rel_y = [y - center[1] for _, y in keypoints]
+
+        x_lo = margin - min(rel_x)
+        x_hi = (W - margin) - max(rel_x)
+        y_lo = margin - min(rel_y)
+        y_hi = (H - margin) - max(rel_y)
+
+        if center_bounds is not None:
+            (bx_lo, bx_hi), (by_lo, by_hi) = center_bounds
+            x_lo = max(x_lo, bx_lo)
+            x_hi = min(x_hi, bx_hi)
+            y_lo = max(y_lo, by_lo)
+            y_hi = min(y_hi, by_hi)
+
+        if x_lo >= x_hi or y_lo >= y_hi:
+            raise ValueError("No valid center available for translated blob.")
+
+        return (
+            float(self.rng.uniform(x_lo, x_hi)),
+            float(self.rng.uniform(y_lo, y_hi)),
+        )
+
+    def _draw_translated_blob(self, draw, keypoints, source_center, target_center, color):
+        dx = target_center[0] - source_center[0]
+        dy = target_center[1] - source_center[1]
+        translated_keypoints = [(x + dx, y + dy) for x, y in keypoints]
+        draw_blob(draw, translated_keypoints, fill=color, outline=color, samples_per_seg=30)
+
     def _create_image_and_segmentations(self, shape_type, shape_complexity, shape_size):
         colors = self.cfg.colors
 
@@ -958,11 +991,24 @@ class ScrambledObjectDataset(Dataset):
             image = Image.new("RGB", (W, H), bg_color)
             draw = ImageDraw.Draw(image)
 
-            draw_shape(
-                shape_type, image, draw, shape_color,
-                shape_complexity, margin=self.cfg.max_patch_size,
-                width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
-            )
+            blob_center = None
+            blob_keypoints = None
+            if shape_type == "blob":
+                blob_center, blob_keypoints = generate_blob_keypoints(
+                    image_size=(W, H),
+                    shape_size=shape_size,
+                    shape_complexity=shape_complexity,
+                    margin=self.cfg.max_patch_size,
+                    rng=self.rng,
+                    fill_fraction=0.99,
+                )
+                draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+            else:
+                draw_shape(
+                    shape_type, image, draw, shape_color,
+                    shape_complexity, margin=self.cfg.max_patch_size,
+                    width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
+                )
             seg1 = self._create_segmentation(image, shape_color, bg_color)
             image_obj1 = image.copy()
 
@@ -970,11 +1016,15 @@ class ScrambledObjectDataset(Dataset):
                 image = image_obj1.copy()
                 draw = ImageDraw.Draw(image)
 
-                draw_shape(
-                    shape_type, image, draw, aux_color,
-                    shape_complexity, margin=self.cfg.max_patch_size,
-                    width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
-                )
+                if shape_type == "blob":
+                    blob2_center = self._sample_blob_center(blob_keypoints, blob_center)
+                    self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
+                else:
+                    draw_shape(
+                        shape_type, image, draw, aux_color,
+                        shape_complexity, margin=self.cfg.max_patch_size,
+                        width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng
+                    )
                 seg2 = self._create_segmentation(image, aux_color, bg_color)
 
                 if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
@@ -995,12 +1045,26 @@ class ScrambledObjectDataset(Dataset):
         image = Image.new("RGB", (W, H), bg_color)
         draw = ImageDraw.Draw(image)
 
-        draw_shape(
-            shape_type, image, draw, shape_color,
-            shape_complexity, margin=self.cfg.max_patch_size,
-            width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
-            center_bounds=bounds
-        )
+        blob_center = None
+        blob_keypoints = None
+        if shape_type == "blob":
+            blob_center, blob_keypoints = generate_blob_keypoints(
+                image_size=(W, H),
+                shape_size=shape_size,
+                shape_complexity=shape_complexity,
+                margin=self.cfg.max_patch_size,
+                rng=self.rng,
+                fill_fraction=0.99,
+                center_bounds=bounds,
+            )
+            draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+        else:
+            draw_shape(
+                shape_type, image, draw, shape_color,
+                shape_complexity, margin=self.cfg.max_patch_size,
+                width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
+                center_bounds=bounds
+            )
         seg1 = self._create_segmentation(image, shape_color, bg_color)
         image_obj1 = image.copy()
 
@@ -1008,12 +1072,16 @@ class ScrambledObjectDataset(Dataset):
             image = image_obj1.copy()
             draw = ImageDraw.Draw(image)
 
-            draw_shape(
-                shape_type, image, draw, aux_color,
-                shape_complexity, margin=self.cfg.max_patch_size,
-                width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
-                center_bounds=bounds
-            )
+            if shape_type == "blob":
+                blob2_center = self._sample_blob_center(blob_keypoints, blob_center, center_bounds=bounds)
+                self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
+            else:
+                draw_shape(
+                    shape_type, image, draw, aux_color,
+                    shape_complexity, margin=self.cfg.max_patch_size,
+                    width=self.cfg.curve_width, shape_size=shape_size, rng=self.rng,
+                    center_bounds=bounds
+                )
             seg2 = self._create_segmentation(image, aux_color, bg_color)
 
             if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):

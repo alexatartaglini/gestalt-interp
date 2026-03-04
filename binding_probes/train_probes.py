@@ -7,17 +7,13 @@ import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 
-from transformers import AutoImageProcessor, AutoModel
-
-from PIL import Image
 from tqdm import tqdm
 
 import utils.dataset
 import utils.probe
-import utils.processing
 
 
 def parse_arguments():
@@ -30,37 +26,26 @@ def parse_arguments():
         help="Model to use as backbone for analysis",
     )
 
-
     parser.add_argument(
-        "-batch_size",
+        "--batch_size",
         default=256,
         type=int,
     )
 
+    parser.add_argument("--lr", default=0.001)
+
+    parser.add_argument("--step_size", default=8)
+
+    parser.add_argument("--scheduler_gamma", default=0.2)
+
+    parser.add_argument("--max_epochs", default=20)
+
     parser.add_argument(
-        "-lr",
-        default=.001
+        "--layers", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     )
 
     parser.add_argument(
-        "-step_size",
-        default=8
-    )
-
-    parser.add_argument(
-        "-scheduler_gamma",
-        default=.2
-    )
-
-    parser.add_argument(
-        "-max_epochs",
-        default=16
-    )
-
-    parser.add_argument("-layer", default=10, type=int, help="layer to train probe on")
-
-    parser.add_argument(
-        "-outfolder", default="./results", type=str, help="Directory to store results"
+        "--outfolder", default="./results", type=str, help="Directory to store results"
     )
 
     args = parser.parse_args()
@@ -68,19 +53,19 @@ def parse_arguments():
 
 
 def train_probe(args, probe_size, trainloader, valloader):
-    
+
     results = {
         "epoch": [],
         "train loss": [],
         "train acc": [],
         "val loss": [],
-        "val acc": []
+        "val acc": [],
     }
 
     probe = utils.probe.QuadraticProbe(probe_size).to("cuda").to(dtype=torch.bfloat16)
     optimizer = optim.Adam(probe.parameters(), lr=args.lr)
-    scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.scheduler_gamma) 
-    
+    scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.scheduler_gamma)
+
     criterion = nn.BCEWithLogitsLoss()
 
     for epoch in range(args.max_epochs):
@@ -91,7 +76,7 @@ def train_probe(args, probe_size, trainloader, valloader):
             hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
 
             labels = labels.to("cuda")
-            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+            pairwise_labels = labels.unsqueeze(1) == labels.unsqueeze(2)
 
             # mask out any pair where either element is background
             valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
@@ -105,13 +90,14 @@ def train_probe(args, probe_size, trainloader, valloader):
             outputs = torch.stack(pairwise_matrices, dim=0)[valid_mask].reshape(-1)
             predictions = torch.sigmoid(outputs) > 0.5
 
-
             loss = criterion(outputs, pairwise_labels)
             loss.backward()
 
             optimizer.step()
 
-            epoch_train_correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+            epoch_train_correct.append(
+                (predictions == pairwise_labels.bool()).detach().cpu().numpy()
+            )
             epoch_train_loss.append(loss.detach().cpu().numpy())
 
         scheduler.step()
@@ -123,7 +109,7 @@ def train_probe(args, probe_size, trainloader, valloader):
                 hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
 
                 labels = labels.to("cuda")
-                pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+                pairwise_labels = labels.unsqueeze(1) == labels.unsqueeze(2)
 
                 # mask out any pair where either element is background
                 valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
@@ -138,20 +124,24 @@ def train_probe(args, probe_size, trainloader, valloader):
                 predictions = torch.sigmoid(outputs) > 0.5
 
                 loss = criterion(outputs, pairwise_labels)
-                epoch_val_correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+                epoch_val_correct.append(
+                    (predictions == pairwise_labels.bool()).detach().cpu().numpy()
+                )
                 epoch_val_loss.append(loss.detach().cpu().numpy())
-        
+
         results["epoch"].append(epoch)
         results["train loss"].append(float(np.mean(epoch_train_loss)))
         results["train acc"].append(float(np.concatenate(epoch_train_correct).mean()))
         results["val loss"].append(float(np.mean(epoch_val_loss)))
         results["val acc"].append(float(np.concatenate(epoch_val_correct).mean()))
-        print(f"Epoch {epoch+1} train loss: {np.mean(epoch_train_loss):.4f}, train acc: {np.concatenate(epoch_train_correct).mean():.4f}, val loss: {np.mean(epoch_val_loss):.4f}, val acc: {np.concatenate(epoch_val_correct).mean():.4f}")
+        print(
+            f"Epoch {epoch+1} train loss: {np.mean(epoch_train_loss):.4f}, train acc: {np.concatenate(epoch_train_correct).mean():.4f}, val loss: {np.mean(epoch_val_loss):.4f}, val acc: {np.concatenate(epoch_val_correct).mean():.4f}"
+        )
     return probe, results
 
 
 def eval_probe(probe, testloader):
-    
+
     results = {
         "loss": [],
         "acc": [],
@@ -166,7 +156,7 @@ def eval_probe(probe, testloader):
         for hidden_states, labels in tqdm(testloader):
             hidden_states = hidden_states.to("cuda").to(dtype=torch.bfloat16)
             labels = labels.to("cuda")
-            pairwise_labels = (labels.unsqueeze(1) == labels.unsqueeze(2))
+            pairwise_labels = labels.unsqueeze(1) == labels.unsqueeze(2)
 
             # mask out any pair where either element is background
             valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
@@ -181,47 +171,50 @@ def eval_probe(probe, testloader):
             predictions = torch.sigmoid(outputs) > 0.5
 
             loss = criterion(outputs, pairwise_labels)
-            correct.append((predictions == pairwise_labels.bool()).detach().cpu().numpy())
+            correct.append(
+                (predictions == pairwise_labels.bool()).detach().cpu().numpy()
+            )
             mean_loss.append(loss.detach().cpu().numpy())
-        
+
         results["loss"].append(float(np.mean(mean_loss)))
         results["acc"].append(float(np.concatenate(correct).mean()))
 
     return results
 
+
 if __name__ == "__main__":
     # Parse Args
     args = parse_arguments()
 
+    for layer in args.layers:
+        trainset = utils.dataset.ProbeDataset(
+            path=f"./cache/{args.model}/train", layer=layer
+        )
+        valset = utils.dataset.ProbeDataset(
+            path=f"./cache/{args.model}/val", layer=layer
+        )
+        testset = utils.dataset.ProbeDataset(
+            path=f"./cache/{args.model}/test", layer=layer
+        )
 
-    trainset = utils.dataset.ProbeDataset(
-        path=f"./cache/{args.model}/{args.layer}/train"
-    )
-    valset = utils.dataset.ProbeDataset(
-        path=f"./cache/{args.model}/{args.layer}/val"
-    )
-    testset = utils.dataset.ProbeDataset(
-        path=f"./cache/{args.model}/{args.layer}/test"
-    )
+        probe_size = trainset[0][0].shape[-1]
 
-    probe_size = trainset[0][0].shape[-1]
+        trainloader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True)
+        valloader = DataLoader(valset, batch_size=args.batch_size, shuffle=False)
+        testloader = DataLoader(testset, batch_size=args.batch_size, shuffle=False)
 
-    trainloader = DataLoader(trainset, batch_size = args.batch_size, shuffle = True)
-    valloader = DataLoader(valset, batch_size = args.batch_size, shuffle = False)
-    testloader = DataLoader(testset, batch_size = args.batch_size, shuffle = False)
+        probe, results = train_probe(args, probe_size, trainloader, valloader)
+        test_results = eval_probe(probe, testloader)
 
-    probe, results = train_probe(args, probe_size, trainloader, valloader)
-    test_results = eval_probe(probe, testloader)
+        output_dir = os.path.join(args.outfolder, args.model, str(layer))
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "results.json"), "w") as f:
+            json.dump(results, f)
+        with open(os.path.join(output_dir, "test_results.json"), "w") as f:
+            json.dump(test_results, f)
 
-    output_dir = os.path.join(args.outfolder, args.model, str(args.layer))
-    os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "results.json"), "w") as f:
-        json.dump(results, f)
-    with open(os.path.join(output_dir, "test_results.json"), "w") as f:
-        json.dump(test_results, f)
+        args_dict = vars(args)
+        with open(os.path.join(output_dir, "args.json"), "w") as f:
+            json.dump(args_dict, f)
 
-    args_dict = vars(args)
-    with open(os.path.join(output_dir, "args.json"), "w") as f:
-        json.dump(args_dict, f)
-
-    torch.save(probe.state_dict(), os.path.join(output_dir, "probe.pth"))
+        torch.save(probe.state_dict(), os.path.join(output_dir, "probe.pth"))

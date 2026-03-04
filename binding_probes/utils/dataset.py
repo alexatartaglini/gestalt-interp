@@ -39,8 +39,8 @@ class ADE20KSegmentation(Dataset):
         return len(self.dataset)
     
 class ProbeDataset(Dataset):
-    def __init__(self, path):
-        self.x = torch.load(path + "_features.pth")
+    def __init__(self, path, layer):
+        self.x = torch.load(path + "_features.pth", weights_only=False)[layer]
         self.y = torch.load(path + "_labels.pth")
 
     def __getitem__(self, idx):

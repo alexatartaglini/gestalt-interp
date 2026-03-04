@@ -1,1 +1,0 @@
-{"model": "facebook/dinov2-base", "dataset": "./cache/scrambled_objects", "layer": 10, "outfolder": "./cache", "random_seed": 19}

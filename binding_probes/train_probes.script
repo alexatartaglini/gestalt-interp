@@ -1,0 +1,11 @@
+#!/bin/bash
+
+#SBATCH -N 1 -n 1
+#SBATCH -p gpu --gres=gpu:1
+#SBATCH --mem=50GB
+#SBATCH -t 1:00:00
+
+source /gpfs/data/epavlick/mlepori/miniconda3/etc/profile.d/conda.sh
+
+conda activate gestalt_interp
+python $PROJECT_DIR/binding_probes/train_probes.py --model $MODEL

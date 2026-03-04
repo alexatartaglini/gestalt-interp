@@ -1,7 +1,7 @@
-binding_probes/cache/scrambled_objects
-binding_probes/cache/1aurent___ade20_k
+binding_probes/cache/scrambled_blobs
 *.pyc
-*.pth
+*features.pth
+*labels.pth
 *.zip
 */.locks/*
 binding_probes/models--facebook--dinov2-base/*

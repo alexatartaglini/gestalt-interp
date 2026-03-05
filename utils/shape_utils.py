@@ -1105,6 +1105,17 @@ def draw_shape(
             rng=rng,
             center_bounds=center_bounds,
         )
+    elif shape_type == "close_blobs":
+        center, keypoints = generate_close_blob_keypoints(
+            image_size=(W, H),
+            shape_size=shape_size,
+            shape_complexity=shape_complexity,
+            margin=0,
+            rng=rng,
+            fill_fraction=0.998,
+        )
+        draw_blob(draw, keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+        return center, keypoints
     elif shape_type == "closedcurve":
         add_random_closed_curve_to_image(
             image,

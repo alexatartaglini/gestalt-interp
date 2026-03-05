@@ -450,6 +450,82 @@ def generate_blob_keypoints(
     pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
     return center, pts
 
+def generate_close_blob_keypoints(
+    image_size,
+    shape_size: float,
+    shape_complexity: int,
+    margin: int = 0,
+    rng: np.random.Generator | None = None,
+    fill_fraction: float = 0.995,
+):
+    """
+    Generates a large, bumpy closed contour for close-blob scenes.
+    Base support can be circular or oval, then high-frequency radial bumps are
+    added so the contour is noticeably rougher than standard blobs.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    W, H = image_size
+    base_radius = max(4.0, float(shape_size) / 2.0)
+    if (W - 2 * margin) > 2 * base_radius and (H - 2 * margin) > 2 * base_radius:
+        cx = float(rng.uniform(margin + base_radius, W - margin - base_radius))
+        cy = float(rng.uniform(margin + base_radius, H - margin - base_radius))
+    else:
+        cx = float(rng.uniform(margin, W - margin))
+        cy = float(rng.uniform(margin, H - margin))
+    center = (cx, cy)
+
+    max_rx = max(1.0, min(cx - margin, (W - margin) - cx))
+    max_ry = max(1.0, min(cy - margin, (H - margin) - cy))
+
+    if rng.uniform() < 0.5:
+        base_rx = base_radius
+        base_ry = base_radius
+    else:
+        aspect = float(rng.uniform(0.55, 0.9))
+        if rng.uniform() < 0.5:
+            base_rx = base_radius
+            base_ry = base_radius * aspect
+        else:
+            base_rx = base_radius * aspect
+            base_ry = base_radius
+
+    base_rx = min(base_rx * fill_fraction, max_rx * 0.995)
+    base_ry = min(base_ry * fill_fraction, max_ry * 0.995)
+    base_rx = max(2.0, base_rx)
+    base_ry = max(2.0, base_ry)
+
+    complexity = max(10, int(shape_complexity))
+    num_points = max(24, complexity * 4)
+    angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
+
+    amp = float(rng.uniform(0.12, 0.28))
+    freq1 = _rng_integers(rng, 5, 10)
+    freq2 = _rng_integers(rng, 10, 16)
+    phase1 = float(rng.uniform(0.0, 2.0 * np.pi))
+    phase2 = float(rng.uniform(0.0, 2.0 * np.pi))
+    noise = rng.normal(0.0, 0.035, size=num_points)
+
+    radial_mod = (
+        1.0
+        + amp * np.sin(freq1 * angles + phase1)
+        + 0.5 * amp * np.sin(freq2 * angles + phase2)
+        + noise
+    )
+    radial_mod = np.clip(radial_mod, 0.65, 1.45)
+
+    pts = []
+    for a, m in zip(angles, radial_mod):
+        x = cx + base_rx * m * math.cos(a)
+        y = cy + base_ry * m * math.sin(a)
+        x = float(np.clip(x, margin, W - margin))
+        y = float(np.clip(y, margin, H - margin))
+        pts.append((x, y))
+
+    pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+    return center, pts
+
 def generate_open_path_points(
     image_size,                  # (W,H)
     num_points: int,             # like "shape_complexity" for curves

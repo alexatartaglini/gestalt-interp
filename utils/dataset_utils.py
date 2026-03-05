@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 from matplotlib.colors import to_rgb
 
-from .shape_utils import draw_shape, generate_blob_keypoints, draw_blob
+from .shape_utils import draw_shape, generate_blob_keypoints, generate_close_blob_keypoints, draw_blob
 from .token_utils import patch_grid_labels_mode1, translation_dirs_and_neighbors_for_patch_size, patch_index_to_image_coords
 
 
@@ -160,7 +160,7 @@ class ContinuityDatasetConfig:
         self.dataset_root = cfg.get("dataset_root", "datasets")  ## Path to the dataset root
         self.dataset_path = cfg.get("dataset_path", "default_dataset")  ## Path to the dataset
         self.full_path = os.path.join(self.dataset_root, self.dataset_path)  ## Full path to the dataset
-        self.shape_types = cfg.get("shape_types", ["circle"])  ## List of shapes: "circle", "oval", "square", "rectangle", "blob", "closedcurve", "curve"
+        self.shape_types = cfg.get("shape_types", ["circle"])  ## List of shapes: "circle", "oval", "square", "rectangle", "blob", "close_blobs", "closedcurve", "curve"
         self.shape_complexities = cfg.get("shape_complexities", [10])  ## List of complexities for blobs and curves (i.e. # points)
         self.shape_sizes = cfg.get("shape_sizes", [80, 115, 150])  ## List of sizes for shapes, lengths for curves
         self.colors = cfg.get("colors", ["red", "blue", "green", "yellow", "purple", "orange", "brown", "pink", "gray", "black", "white"])  ## Possible shape & background colors
@@ -709,7 +709,7 @@ class ScrambledObjectDatasetConfig:
         self.dataset_path = cfg.get("dataset_path", "default_dataset")  ## Path to the dataset
         self.full_path = os.path.join(self.dataset_root, self.dataset_path)  ## Full path to the dataset
         self.n_objects = cfg.get("n_objects", 2)
-        self.shape_types = cfg.get("shape_types", ["circle"])  ## List of shapes: "circle", "oval", "square", "rectangle", "blob", "closedcurve", "curve"
+        self.shape_types = cfg.get("shape_types", ["circle"])  ## List of shapes: "circle", "oval", "square", "rectangle", "blob", "close_blobs", "closedcurve", "curve"
         self.shape_complexities = cfg.get("shape_complexities", [10])  ## List of complexities for blobs and curves (i.e. # points)
         self.shape_sizes = cfg.get("shape_sizes", [80, 115, 150])  ## List of sizes for shapes, lengths for curves
         self.colors = cfg.get("colors", ["red", "blue", "green", "yellow", "purple", "orange", "brown", "pink", "gray", "black", "white"])  ## Possible shape & background colors
@@ -962,6 +962,63 @@ class ScrambledObjectDataset(Dataset):
         translated_keypoints = [(x + dx, y + dy) for x, y in keypoints]
         draw_blob(draw, translated_keypoints, fill=color, outline=color, samples_per_seg=30)
 
+    def _sample_close_blob_offset(self, seg: Image.Image):
+        arr = np.array(seg, dtype=np.uint8)
+        ys, xs = np.where(arr > 0)
+        if len(xs) == 0:
+            raise ValueError("Empty segmentation for close blob offset sampling.")
+
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        gap_px = int(self.rng.randint(1, 5))  # 1..4 empty pixels between bboxes
+        axis = "x" if self.rng.uniform() < 0.5 else "y"
+        sign = -1 if self.rng.uniform() < 0.5 else 1
+
+        if axis == "x":
+            shift = sign * (width + gap_px)
+            return float(shift), 0.0
+        shift = sign * (height + gap_px)
+        return 0.0, float(shift)
+
+    def _sample_pair_anchor_delta(
+        self,
+        keypoints1,
+        keypoints2,
+        edge_bias: bool = True,
+    ):
+        W, H = self.cfg.image_size
+        all_pts = keypoints1 + keypoints2
+        xs = np.array([p[0] for p in all_pts], dtype=float)
+        ys = np.array([p[1] for p in all_pts], dtype=float)
+        min_x, max_x = xs.min(), xs.max()
+        min_y, max_y = ys.min(), ys.max()
+
+        lo_dx = -min_x
+        hi_dx = (W - 1) - max_x
+        lo_dy = -min_y
+        hi_dy = (H - 1) - max_y
+        if lo_dx > hi_dx or lo_dy > hi_dy:
+            raise ValueError("No feasible translation to keep close blobs in-frame.")
+
+        if not edge_bias:
+            dx = float(self.rng.uniform(lo_dx, hi_dx))
+            dy = float(self.rng.uniform(lo_dy, hi_dy))
+            return dx, dy
+
+        jitter = float(self.rng.uniform(0.0, 2.5))
+        if self.rng.uniform() < 0.5:
+            dx = lo_dx + jitter
+        else:
+            dx = hi_dx - jitter
+        if self.rng.uniform() < 0.5:
+            dy = lo_dy + jitter
+        else:
+            dy = hi_dy - jitter
+
+        dx = float(np.clip(dx, lo_dx, hi_dx))
+        dy = float(np.clip(dy, lo_dy, hi_dy))
+        return dx, dy
+
     def _create_image_and_segmentations(self, shape_type, shape_complexity, shape_size):
         colors = self.cfg.colors
 
@@ -1003,6 +1060,16 @@ class ScrambledObjectDataset(Dataset):
                     fill_fraction=0.99,
                 )
                 draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+            elif shape_type == "close_blobs":
+                blob_center, blob_keypoints = generate_close_blob_keypoints(
+                    image_size=(W, H),
+                    shape_size=shape_size,
+                    shape_complexity=shape_complexity,
+                    margin=0,
+                    rng=self.rng,
+                    fill_fraction=0.998,
+                )
+                draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
             else:
                 draw_shape(
                     shape_type, image, draw, shape_color,
@@ -1019,6 +1086,19 @@ class ScrambledObjectDataset(Dataset):
                 if shape_type == "blob":
                     blob2_center = self._sample_blob_center(blob_keypoints, blob_center)
                     self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
+                elif shape_type == "close_blobs":
+                    x_off, y_off = self._sample_close_blob_offset(seg1)
+                    blob2_keypoints = [(x + x_off, y + y_off) for x, y in blob_keypoints]
+                    edge_bias = shape_size >= 0.35 * min(W, H)
+                    dx, dy = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                    blob1_keypoints = [(x + dx, y + dy) for x, y in blob_keypoints]
+                    blob2_keypoints = [(x + dx, y + dy) for x, y in blob2_keypoints]
+
+                    image = Image.new("RGB", (W, H), bg_color)
+                    draw = ImageDraw.Draw(image)
+                    draw_blob(draw, blob1_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+                    draw_blob(draw, blob2_keypoints, fill=aux_color, outline=aux_color, samples_per_seg=30)
+                    seg1 = self._create_segmentation(image, shape_color, bg_color)
                 else:
                     draw_shape(
                         shape_type, image, draw, aux_color,
@@ -1027,7 +1107,15 @@ class ScrambledObjectDataset(Dataset):
                     )
                 seg2 = self._create_segmentation(image, aux_color, bg_color)
 
-                if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
+                if shape_type == "close_blobs":
+                    bbox_dist = self._bbox_min_distance(np.array(seg1, dtype=np.uint8), np.array(seg2, dtype=np.uint8))
+                    # At least ~1 px apart and no more than a few pixels apart.
+                    if (not self._segmentations_overlap(seg1, seg2, 0)) and 2.0 <= bbox_dist <= 5.0:
+                        return self._finalize_two_object_image(
+                            image, seg1, seg2, aux_color, shape_color,
+                            bg_color, bg_color_name, shape_color_name
+                        )
+                elif not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
                     return self._finalize_two_object_image(
                         image, seg1, seg2, aux_color, shape_color,
                         bg_color, bg_color_name, shape_color_name
@@ -1058,6 +1146,16 @@ class ScrambledObjectDataset(Dataset):
                 center_bounds=bounds,
             )
             draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+        elif shape_type == "close_blobs":
+            blob_center, blob_keypoints = generate_close_blob_keypoints(
+                image_size=(W, H),
+                shape_size=shape_size,
+                shape_complexity=shape_complexity,
+                margin=0,
+                rng=self.rng,
+                fill_fraction=0.998,
+            )
+            draw_blob(draw, blob_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
         else:
             draw_shape(
                 shape_type, image, draw, shape_color,
@@ -1075,6 +1173,19 @@ class ScrambledObjectDataset(Dataset):
             if shape_type == "blob":
                 blob2_center = self._sample_blob_center(blob_keypoints, blob_center, center_bounds=bounds)
                 self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
+            elif shape_type == "close_blobs":
+                x_off, y_off = self._sample_close_blob_offset(seg1)
+                blob2_keypoints = [(x + x_off, y + y_off) for x, y in blob_keypoints]
+                edge_bias = True
+                dx, dy = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                blob1_keypoints = [(x + dx, y + dy) for x, y in blob_keypoints]
+                blob2_keypoints = [(x + dx, y + dy) for x, y in blob2_keypoints]
+
+                image = Image.new("RGB", (W, H), bg_color)
+                draw = ImageDraw.Draw(image)
+                draw_blob(draw, blob1_keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+                draw_blob(draw, blob2_keypoints, fill=aux_color, outline=aux_color, samples_per_seg=30)
+                seg1 = self._create_segmentation(image, shape_color, bg_color)
             else:
                 draw_shape(
                     shape_type, image, draw, aux_color,
@@ -1084,7 +1195,14 @@ class ScrambledObjectDataset(Dataset):
                 )
             seg2 = self._create_segmentation(image, aux_color, bg_color)
 
-            if not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
+            if shape_type == "close_blobs":
+                bbox_dist = self._bbox_min_distance(np.array(seg1, dtype=np.uint8), np.array(seg2, dtype=np.uint8))
+                if (not self._segmentations_overlap(seg1, seg2, 0)) and 2.0 <= bbox_dist <= 5.0:
+                    return self._finalize_two_object_image(
+                        image, seg1, seg2, aux_color, shape_color,
+                        bg_color, bg_color_name, shape_color_name
+                    )
+            elif not self._segmentations_overlap(seg1, seg2, self.cfg.min_distance_px):
                 return self._finalize_two_object_image(
                     image, seg1, seg2, aux_color, shape_color,
                     bg_color, bg_color_name, shape_color_name
@@ -1195,7 +1313,7 @@ class ScrambledObjectDataset(Dataset):
             experiment_config = {
                 "seed": self.cfg.seed,
                 "shape_type": params[0],
-                "shape_complexity": params[1] if params[0] in ["blob", "curve", "closedcurve"] else None,
+                "shape_complexity": params[1] if params[0] in ["blob", "close_blobs", "curve", "closedcurve"] else None,
                 "shape_size": params[2],
                 "bg_color": scene_colors[0],
                 "shape_color": scene_colors[1],

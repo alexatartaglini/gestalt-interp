@@ -479,11 +479,13 @@ def generate_close_blob_keypoints(
     max_rx = max(1.0, min(cx - margin, (W - margin) - cx))
     max_ry = max(1.0, min(cy - margin, (H - margin) - cy))
 
-    if rng.uniform() < 0.5:
+    # Keep close blobs mostly round to avoid "egg-like" silhouettes.
+    # Only allow mild anisotropy.
+    if rng.uniform() < 0.8:
         base_rx = base_radius
         base_ry = base_radius
     else:
-        aspect = float(rng.uniform(0.55, 0.9))
+        aspect = float(rng.uniform(0.9, 0.98))
         if rng.uniform() < 0.5:
             base_rx = base_radius
             base_ry = base_radius * aspect
@@ -501,7 +503,7 @@ def generate_close_blob_keypoints(
     angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
 
     # Multi-scale, non-periodic radial profile to avoid rotational symmetry.
-    coarse_n = max(8, num_points // 4)
+    coarse_n = max(10, num_points // 5)
     coarse_ctrl = rng.normal(0.0, 1.0, size=coarse_n)
     coarse_idx = np.linspace(0.0, num_points, coarse_n, endpoint=False)
     full_idx = np.arange(num_points)
@@ -513,21 +515,22 @@ def generate_close_blob_keypoints(
 
     radial_mod = (
         1.0
-        + float(rng.uniform(0.12, 0.24)) * coarse_noise / (np.max(np.abs(coarse_noise)) + 1e-8)
-        + float(rng.uniform(0.05, 0.12)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
+        + float(rng.uniform(0.08, 0.16)) * coarse_noise / (np.max(np.abs(coarse_noise)) + 1e-8)
+        + float(rng.uniform(0.08, 0.18)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
     )
 
     # Add asymmetric local protrusions/indentations.
-    n_lobes = _rng_integers(rng, 3, 8)
+    n_lobes = _rng_integers(rng, 7, 15)
     for _ in range(n_lobes):
         c = float(rng.uniform(0.0, 2.0 * np.pi))
-        w = float(rng.uniform(0.18, 0.52))
-        sgn = -1.0 if rng.uniform() < 0.45 else 1.0
-        a = sgn * float(rng.uniform(0.05, 0.17))
+        # Narrower lobes produce bumpier local convexity.
+        w = float(rng.uniform(0.08, 0.22))
+        sgn = -1.0 if rng.uniform() < 0.35 else 1.0
+        a = sgn * float(rng.uniform(0.05, 0.2))
         d = np.angle(np.exp(1j * (angles - c)))  # wrapped angle difference
         radial_mod += a * np.exp(-(d * d) / (2.0 * w * w))
 
-    radial_mod = np.clip(radial_mod, 0.62, 1.52)
+    radial_mod = np.clip(radial_mod, 0.7, 1.55)
 
     pts = []
     for a, m in zip(angles, radial_mod):

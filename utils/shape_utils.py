@@ -500,20 +500,34 @@ def generate_close_blob_keypoints(
     num_points = max(24, complexity * 4)
     angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
 
-    amp = float(rng.uniform(0.12, 0.28))
-    freq1 = _rng_integers(rng, 5, 10)
-    freq2 = _rng_integers(rng, 10, 16)
-    phase1 = float(rng.uniform(0.0, 2.0 * np.pi))
-    phase2 = float(rng.uniform(0.0, 2.0 * np.pi))
-    noise = rng.normal(0.0, 0.035, size=num_points)
+    # Multi-scale, non-periodic radial profile to avoid rotational symmetry.
+    coarse_n = max(8, num_points // 4)
+    coarse_ctrl = rng.normal(0.0, 1.0, size=coarse_n)
+    coarse_idx = np.linspace(0.0, num_points, coarse_n, endpoint=False)
+    full_idx = np.arange(num_points)
+    coarse_noise = np.interp(full_idx, coarse_idx, coarse_ctrl, period=num_points)
+    coarse_noise = gaussian_filter1d(coarse_noise, sigma=max(1.0, num_points / 18.0), mode="wrap")
+
+    fine_noise = rng.normal(0.0, 1.0, size=num_points)
+    fine_noise = gaussian_filter1d(fine_noise, sigma=max(0.8, num_points / 42.0), mode="wrap")
 
     radial_mod = (
         1.0
-        + amp * np.sin(freq1 * angles + phase1)
-        + 0.5 * amp * np.sin(freq2 * angles + phase2)
-        + noise
+        + float(rng.uniform(0.12, 0.24)) * coarse_noise / (np.max(np.abs(coarse_noise)) + 1e-8)
+        + float(rng.uniform(0.05, 0.12)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
     )
-    radial_mod = np.clip(radial_mod, 0.65, 1.45)
+
+    # Add asymmetric local protrusions/indentations.
+    n_lobes = _rng_integers(rng, 3, 8)
+    for _ in range(n_lobes):
+        c = float(rng.uniform(0.0, 2.0 * np.pi))
+        w = float(rng.uniform(0.18, 0.52))
+        sgn = -1.0 if rng.uniform() < 0.45 else 1.0
+        a = sgn * float(rng.uniform(0.05, 0.17))
+        d = np.angle(np.exp(1j * (angles - c)))  # wrapped angle difference
+        radial_mod += a * np.exp(-(d * d) / (2.0 * w * w))
+
+    radial_mod = np.clip(radial_mod, 0.62, 1.52)
 
     pts = []
     for a, m in zip(angles, radial_mod):

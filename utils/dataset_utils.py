@@ -971,7 +971,7 @@ class ScrambledObjectDataset(Dataset):
         W, H = self.cfg.image_size
         width = int(xs.max() - xs.min() + 1)
         height = int(ys.max() - ys.min() + 1)
-        gap_px = int(self.rng.randint(1, 5))  # 1..4 empty pixels between bboxes
+        gap_px = int(self.rng.randint(7, 11))  # 7..10 empty pixels between bboxes
 
         candidates = []
         # Side-by-side placement is feasible only if the combined bbox can fit.
@@ -1123,8 +1123,8 @@ class ScrambledObjectDataset(Dataset):
 
                 if shape_type == "close_blobs":
                     bbox_dist = self._bbox_min_distance(np.array(seg1, dtype=np.uint8), np.array(seg2, dtype=np.uint8))
-                    # At least ~1 px apart and no more than a few pixels apart.
-                    if (not self._segmentations_overlap(seg1, seg2, 0)) and 2.0 <= bbox_dist <= 5.0:
+                    # Enforce a larger gap between close blobs.
+                    if (not self._segmentations_overlap(seg1, seg2, 0)) and 8.0 <= bbox_dist <= 11.0:
                         return self._finalize_two_object_image(
                             image, seg1, seg2, aux_color, shape_color,
                             bg_color, bg_color_name, shape_color_name
@@ -1217,7 +1217,7 @@ class ScrambledObjectDataset(Dataset):
 
             if shape_type == "close_blobs":
                 bbox_dist = self._bbox_min_distance(np.array(seg1, dtype=np.uint8), np.array(seg2, dtype=np.uint8))
-                if (not self._segmentations_overlap(seg1, seg2, 0)) and 2.0 <= bbox_dist <= 5.0:
+                if (not self._segmentations_overlap(seg1, seg2, 0)) and 8.0 <= bbox_dist <= 11.0:
                     return self._finalize_two_object_image(
                         image, seg1, seg2, aux_color, shape_color,
                         bg_color, bg_color_name, shape_color_name

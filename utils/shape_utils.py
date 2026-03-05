@@ -499,38 +499,34 @@ def generate_close_blob_keypoints(
     base_ry = max(2.0, base_ry)
 
     complexity = max(10, int(shape_complexity))
-    num_points = max(24, complexity * 4)
+    num_points = max(36, complexity * 5)
     angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
 
-    # Multi-scale, non-periodic radial profile to avoid rotational symmetry.
-    coarse_n = max(10, num_points // 5)
-    coarse_ctrl = rng.normal(0.0, 1.0, size=coarse_n)
-    coarse_idx = np.linspace(0.0, num_points, coarse_n, endpoint=False)
-    full_idx = np.arange(num_points)
-    coarse_noise = np.interp(full_idx, coarse_idx, coarse_ctrl, period=num_points)
-    coarse_noise = gaussian_filter1d(coarse_noise, sigma=max(1.0, num_points / 18.0), mode="wrap")
+    # Low-frequency random harmonic profile:
+    # more globally irregular and less "spiky symmetric".
+    radial_mod = np.ones(num_points, dtype=float)
+    for k in range(2, 8):
+        coeff = float(rng.normal(0.0, 0.18 / (k ** 0.65)))
+        phase = float(rng.uniform(0.0, 2.0 * np.pi))
+        radial_mod += coeff * np.sin(k * angles + phase)
 
-    fine_noise = rng.normal(0.0, 1.0, size=num_points)
-    fine_noise = gaussian_filter1d(fine_noise, sigma=max(0.8, num_points / 42.0), mode="wrap")
-
-    radial_mod = (
-        1.0
-        + float(rng.uniform(0.08, 0.16)) * coarse_noise / (np.max(np.abs(coarse_noise)) + 1e-8)
-        + float(rng.uniform(0.08, 0.18)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
-    )
-
-    # Add asymmetric local protrusions/indentations.
-    n_lobes = _rng_integers(rng, 7, 15)
+    # Broad asymmetric lobes/dents (organic "splat" look).
+    n_lobes = _rng_integers(rng, 4, 10)
     for _ in range(n_lobes):
         c = float(rng.uniform(0.0, 2.0 * np.pi))
-        # Narrower lobes produce bumpier local convexity.
-        w = float(rng.uniform(0.08, 0.22))
-        sgn = -1.0 if rng.uniform() < 0.35 else 1.0
-        a = sgn * float(rng.uniform(0.05, 0.2))
+        w = float(rng.uniform(0.22, 0.55))
+        sgn = -1.0 if rng.uniform() < 0.4 else 1.0
+        a = sgn * float(rng.uniform(0.05, 0.22))
         d = np.angle(np.exp(1j * (angles - c)))  # wrapped angle difference
         radial_mod += a * np.exp(-(d * d) / (2.0 * w * w))
 
-    radial_mod = np.clip(radial_mod, 0.7, 1.55)
+    # Tiny residual texture only; keep silhouette smooth.
+    fine_noise = rng.normal(0.0, 1.0, size=num_points)
+    fine_noise = gaussian_filter1d(fine_noise, sigma=max(1.0, num_points / 36.0), mode="wrap")
+    radial_mod += float(rng.uniform(0.01, 0.04)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
+
+    radial_mod = gaussian_filter1d(radial_mod, sigma=max(0.8, num_points / 56.0), mode="wrap")
+    radial_mod = np.clip(radial_mod, 0.68, 1.65)
 
     pts = []
     for a, m in zip(angles, radial_mod):

@@ -968,17 +968,25 @@ class ScrambledObjectDataset(Dataset):
         if len(xs) == 0:
             raise ValueError("Empty segmentation for close blob offset sampling.")
 
+        W, H = self.cfg.image_size
         width = int(xs.max() - xs.min() + 1)
         height = int(ys.max() - ys.min() + 1)
         gap_px = int(self.rng.randint(1, 5))  # 1..4 empty pixels between bboxes
-        axis = "x" if self.rng.uniform() < 0.5 else "y"
-        sign = -1 if self.rng.uniform() < 0.5 else 1
 
-        if axis == "x":
-            shift = sign * (width + gap_px)
-            return float(shift), 0.0
-        shift = sign * (height + gap_px)
-        return 0.0, float(shift)
+        candidates = []
+        # Side-by-side placement is feasible only if the combined bbox can fit.
+        if 2 * width + gap_px <= W:
+            shift = float(width + gap_px)
+            candidates.extend([(shift, 0.0), (-shift, 0.0)])
+        if 2 * height + gap_px <= H:
+            shift = float(height + gap_px)
+            candidates.extend([(0.0, shift), (0.0, -shift)])
+
+        if not candidates:
+            return None
+
+        idx = int(self.rng.randint(0, len(candidates)))
+        return candidates[idx]
 
     def _sample_pair_anchor_delta(
         self,
@@ -998,7 +1006,7 @@ class ScrambledObjectDataset(Dataset):
         lo_dy = -min_y
         hi_dy = (H - 1) - max_y
         if lo_dx > hi_dx or lo_dy > hi_dy:
-            raise ValueError("No feasible translation to keep close blobs in-frame.")
+            return None
 
         if not edge_bias:
             dx = float(self.rng.uniform(lo_dx, hi_dx))
@@ -1087,10 +1095,16 @@ class ScrambledObjectDataset(Dataset):
                     blob2_center = self._sample_blob_center(blob_keypoints, blob_center)
                     self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
                 elif shape_type == "close_blobs":
-                    x_off, y_off = self._sample_close_blob_offset(seg1)
+                    offset = self._sample_close_blob_offset(seg1)
+                    if offset is None:
+                        continue
+                    x_off, y_off = offset
                     blob2_keypoints = [(x + x_off, y + y_off) for x, y in blob_keypoints]
                     edge_bias = shape_size >= 0.35 * min(W, H)
-                    dx, dy = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                    delta = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                    if delta is None:
+                        continue
+                    dx, dy = delta
                     blob1_keypoints = [(x + dx, y + dy) for x, y in blob_keypoints]
                     blob2_keypoints = [(x + dx, y + dy) for x, y in blob2_keypoints]
 
@@ -1174,10 +1188,16 @@ class ScrambledObjectDataset(Dataset):
                 blob2_center = self._sample_blob_center(blob_keypoints, blob_center, center_bounds=bounds)
                 self._draw_translated_blob(draw, blob_keypoints, blob_center, blob2_center, aux_color)
             elif shape_type == "close_blobs":
-                x_off, y_off = self._sample_close_blob_offset(seg1)
+                offset = self._sample_close_blob_offset(seg1)
+                if offset is None:
+                    continue
+                x_off, y_off = offset
                 blob2_keypoints = [(x + x_off, y + y_off) for x, y in blob_keypoints]
                 edge_bias = True
-                dx, dy = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                delta = self._sample_pair_anchor_delta(blob_keypoints, blob2_keypoints, edge_bias=edge_bias)
+                if delta is None:
+                    continue
+                dx, dy = delta
                 blob1_keypoints = [(x + dx, y + dy) for x, y in blob_keypoints]
                 blob2_keypoints = [(x + dx, y + dy) for x, y in blob2_keypoints]
 

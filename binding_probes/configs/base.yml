@@ -1,0 +1,9 @@
+tl_model:  # Set this
+patch_size: # Set this
+dataset: "./cache/scrambled_blobs/test"
+mean_dataset: "./cache/scrambled_blobs/val"
+probe_path: # Set this
+layer: # Set this 
+outfolder: "./results/"
+ablation_heads: # Set this
+n_controls: 20

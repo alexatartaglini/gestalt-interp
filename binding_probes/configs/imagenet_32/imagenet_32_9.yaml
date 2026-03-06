@@ -1,0 +1,14 @@
+ablation_heads:
+- '1_10'
+- '1_4'
+- '0_3'
+- '1_0'
+- '2_2'
+dataset: ./cache/scrambled_blobs/test
+layer: 9
+mean_dataset: ./cache/scrambled_blobs/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 32
+probe_path: google/vit-base-patch32-224-in21k
+tl_model: imagenet

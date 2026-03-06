@@ -80,6 +80,16 @@ def train_probe(args, probe_size, trainloader, valloader):
 
             # mask out any pair where either element is background
             valid_mask = (labels.unsqueeze(1) != 0) & (labels.unsqueeze(2) != 0)
+
+            # Sample pairs to match positive and negative position distributions
+            offset_mask = utils.processing.compute_l1_binned_balanced_mask(
+                labels,
+                grid_size=None,
+                num_bins=5,
+                max_pairs_per_bin=32,
+            )
+
+            valid_mask = valid_mask & offset_mask
             pairwise_labels = pairwise_labels[valid_mask].reshape(-1).float()
 
             # Compute pairwise probe results

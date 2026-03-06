@@ -14,7 +14,7 @@ pretrain_paths = {
     "dino": "facebook/dino-vitb{patch_size}",
     "imagenet": "google/vit-base-patch{patch_size}-224-in21k",
     "clip": "openai/clip-vit-base-patch{patch_size}",
-    "dinov2": "facebook/dinov2-large",
+    "dinov2": "facebook/dinov2-base",
     "scratch": None,
 }
 pretrain_processor_classes = {
@@ -106,6 +106,49 @@ class Model:
             "model_architecture_type": self.load_type,
         }
 
+    def make_head_uniform_over_patches(self, layer_idx: int, head_idx: int,):
+        """
+        Returns a (hook_name, hook_fn) pair that overwrites one head's attention
+        pattern to be uniform over patch tokens (keys).
+        
+        hook_pattern shape is [batch, n_heads, q, k].
+        """
+        hook_name = f"blocks.{layer_idx}.attn.hook_pattern"
+
+        def hook_fn(pattern: torch.Tensor, hook):
+            # pattern: [B, H, Q, K] after softmax
+            B, H, Q, K = pattern.shape
+            device = pattern.device
+            dtype = pattern.dtype
+
+            # Uniform attention over keys
+            uniform = torch.full((B, Q, K), 1.0 / K, device=device, dtype=dtype)
+            # Overwrite just that head
+            pattern[:, head_idx, :, :] = uniform
+            return pattern
+
+        return hook_name, hook_fn
+
+    def run_with_head_ablation(self, im, head_strs, remove_batch_dim=False):
+        im = self.preprocess(im).to(self.device)
+
+        # Head str is "layer_head-idx"
+        # Add hooks to ablate all heads
+        for head_str in head_strs:
+            head_str = head_str.split("_")
+            layer = int(head_str[0])
+            head = int(head_str[1])
+            hook_name, hook = self.make_head_uniform_over_patches(layer, head)
+            self.model.add_hook(hook_name, hook)
+
+        logits, cache = self.model.run_with_cache(
+                im,
+                remove_batch_dim=remove_batch_dim
+            )
+        self.model.reset_hooks(including_permanent=True)
+
+        return logits, cache
+    
     def run_with_cache(self, im, remove_batch_dim=False):
         im = self.preprocess(im).to(self.device)
         logits, cache = self.model.run_with_cache(im, remove_batch_dim=remove_batch_dim)

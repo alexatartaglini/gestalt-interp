@@ -12,6 +12,7 @@ import torch
 from transformers import AutoImageProcessor, AutoModel, ViTModel, ViTConfig
 
 from tqdm import tqdm
+from utils import processing
 
 def parse_arguments():
 
@@ -19,7 +20,7 @@ def parse_arguments():
     parser.add_argument(
         "-m",
         "--model",
-        default="facebook/dinov2-base",
+        default="openai/clip-vit-base-patch32",
         help="Model to use as backbone for analysis",
     )
 
@@ -45,36 +46,6 @@ def parse_arguments():
     return args
 
 
-def cfg2labels(file):
-    obj1_patches = file["object1_patch_indices"]
-    obj2_patches = file["object2_patch_indices"]
-
-    bg_patches = file["bg_patch_indices"]
-
-    total_patches = np.max(obj1_patches + obj2_patches + bg_patches)
-
-    # Ensure no overlapping patches!
-    filtered_obj1_patches = list(set(obj1_patches) - set(obj2_patches))
-    filtered_obj2_patches = list(set(obj2_patches) - set(obj1_patches))
-
-    # We get rid of the [CLS] token, so 0 index these object patches
-    obj1_patches = [idx - 1 for idx in filtered_obj1_patches] 
-    obj2_patches = [idx - 1 for idx in filtered_obj2_patches]
-
-    obj_mask = np.zeros(total_patches)
-    obj_mask[obj1_patches] = 1 # mask segmenting object 1 from background
-    obj_mask[obj2_patches] = 2 # mask segmenting object 2 from background
-
-    return torch.Tensor(obj_mask)
-
-
-def img2states(img, processor, model):
-    inputs = processor(img, return_tensors="pt")
-    inputs = {k: v.cuda().to(dtype=torch.bfloat16) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
-    with torch.no_grad():  # Ensure no gradients are computed
-        hidden_states = model(**inputs, output_hidden_states=True, return_dict=True).hidden_states
-    return hidden_states # Always only one image here
-
 def process_dataset(args, split, processor, model):
 
     patch_size = model.config.patch_size
@@ -94,8 +65,8 @@ def process_dataset(args, split, processor, model):
         img_path = os.path.join(dataset, datum, "base.png")
         cfg_path = os.path.join(dataset, datum, f"cfg_PATCHSIZE-{patch_size}.yaml")
 
-        labels.append(cfg2labels(yaml.safe_load(open(cfg_path, "r"))))
-        all_states = img2states(Image.open(img_path).convert("RGB"), processor, model)
+        labels.append(processing.cfg2labels(yaml.safe_load(open(cfg_path, "r"))))
+        all_states = processing.img2states(Image.open(img_path).convert("RGB"), processor, model)
 
         for layer in args.layers:
             hidden_states = all_states[layer+1] # +1 skips embedding layer

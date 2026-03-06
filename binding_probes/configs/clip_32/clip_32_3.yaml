@@ -1,0 +1,14 @@
+ablation_heads:
+- '1_5'
+- '1_3'
+- 0_8
+- '2_2'
+- '3_1'
+dataset: ./cache/scrambled_blobs/test
+layer: 3
+mean_dataset: ./cache/scrambled_blobs/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 32
+probe_path: openai/clip-vit-base-patch32
+tl_model: clip

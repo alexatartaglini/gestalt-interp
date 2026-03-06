@@ -4,4 +4,8 @@ binding_probes/cache/scrambled_blobs
 *labels.pth
 *.zip
 */.locks/*
+binding_probes/cache/.locks*
 binding_probes/models--facebook--dinov2-base/*
+binding_probes/cache/models--*
+*.err
+*.out

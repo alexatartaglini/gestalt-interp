@@ -1,0 +1,11 @@
+#!/bin/sh
+
+#SBATCH -N 1-1 -n 1 
+#SBATCH -p 3090-gcondo --gres=gpu:1
+#SBATCH --mem=50gb
+#SBATCH -t 12:00:00
+
+source /gpfs/data/epavlick/mlepori/miniconda3/etc/profile.d/conda.sh
+
+conda activate gestalt_interp
+python $PROJECT_DIR/binding_probes/gestalt_eval.py --config $CONFIG

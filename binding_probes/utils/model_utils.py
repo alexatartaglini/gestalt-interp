@@ -1,20 +1,26 @@
 import sys
 import torch
+import re
 
 sys.path.insert(1, "TransformerLens")
 from transformer_lens.HookedViT import HookedViT
-from transformers import AutoProcessor, AutoImageProcessor
+from transformer_lens.loading_from_pretrained import convert_vit_weights
+from transformers import AutoProcessor, AutoImageProcessor, ViTForImageClassification
 from transformers import logging
 logging.set_verbosity_error()
 
 
 pretrain_paths = {
+    "mae": "facebook/vit-mae-base",  # patch size = 16
+    "dino": "facebook/dino-vitb{patch_size}",
     "imagenet": "google/vit-base-patch{patch_size}-224-in21k",
     "clip": "openai/clip-vit-base-patch{patch_size}",
     "dinov2": "facebook/dinov2-base",
     "scratch": None,
 }
 pretrain_processor_classes = {
+    "mae": AutoImageProcessor,
+    "dino": AutoImageProcessor,
     "imagenet": AutoImageProcessor,
     "clip": AutoProcessor,
     "dinov2": AutoImageProcessor,
@@ -28,13 +34,13 @@ class Model:
         pretrain="imagenet",
         patch_size=32,
         scratch_architecture="imagenet",
-        cache_dir=".",
+        cache_dir="./cache/",
         device="auto"
     ):
         '''
-        :param pretrain: "imagenet", "clip", "scratch", "dinov2", 
-        :param patch_size: 16, 32
-        :param scratch_architecture: "imagenet", "dinov2", "clip"
+        :param pretrain: "mae", "dino", "imagenet", "clip", "scratch", "dinov2", 
+        :param patch_size: 14, 16, 32
+        :param scratch_architecture: "mae", "dino", "imagenet", "dinov2", "clip"
         '''
         if pretrain is None:
             pretrain = "scratch"
@@ -49,11 +55,27 @@ class Model:
         pretrain_path = pretrain_paths[self.load_type].format(patch_size=patch_size)
         pretrain_processor_class = pretrain_processor_classes[pretrain]
 
-        self.model = HookedViT.from_pretrained(
-            pretrain_path,
-            cache_dir=cache_dir,
-            is_clip=pretrain == "clip",
-        )
+        if self.load_type in ["dino", "mae"]:
+            tl_path = pretrain_paths["imagenet"].format(patch_size=patch_size)
+
+            hf_model = ViTForImageClassification.from_pretrained(pretrain_path)
+
+            self.model = HookedViT.from_pretrained(
+                tl_path,
+                cache_dir=cache_dir,
+                is_clip=pretrain == "clip",
+            )
+
+            state_dict = convert_vit_weights(hf_model, self.model.cfg)
+            self.model.load_state_dict(state_dict, strict=False)
+
+            del hf_model
+        else:
+            self.model = HookedViT.from_pretrained(
+                pretrain_path,
+                cache_dir=cache_dir,
+                is_clip=pretrain == "clip",
+            )
         self.image_processor = pretrain_processor_class.from_pretrained(
             pretrain_path,
             cache_dir=cache_dir
@@ -85,13 +107,6 @@ class Model:
             "model_architecture_type": self.load_type,
         }
 
-    def run_with_cache(self, im, remove_batch_dim=False):
-        im = self.preprocess(im).to(self.device)
-        logits, cache = self.model.run_with_cache(im, remove_batch_dim=remove_batch_dim)
-        return logits, cache
-    
-    import torch
-
     def make_head_uniform_over_patches(self, layer_idx: int, head_idx: int,):
         """
         Returns a (hook_name, hook_fn) pair that overwrites one head's attention
@@ -115,14 +130,93 @@ class Model:
 
         return hook_name, hook_fn
 
-    def run_with_head_ablation(self, im, head_str, remove_batch_dim=False):
-        # Head str is "layer_head-idx"
-        head_str = head_str.split("_")
-        layer = int(head_str[0])
-        head = int(head_str[1])
+    def attend_to_cls_only(self, layer_idx: int, head_idx: int,):
+        """
+        Returns a (hook_name, hook_fn) pair that overwrites one head's attention
+        pattern to only attend to cls.
+        
+        hook_pattern shape is [batch, n_heads, q, k].
+        """
+        hook_name = f"blocks.{layer_idx}.attn.hook_pattern"
+
+        def hook_fn(pattern: torch.Tensor, hook):
+            # pattern: [B, H, Q, K] after softmax
+            B, H, Q, K = pattern.shape
+            device = pattern.device
+            dtype = pattern.dtype
+
+             # Create a tensor of pure zeros
+            cls_only = torch.zeros((B, Q, K), device=device, dtype=dtype)
+            
+            # Force 100% of the attention weight to the CLS token (Key index 0)
+            cls_only[:, :, 0] = 1.0
+            pattern[:, head_idx, :, :] = cls_only
+            return pattern
+
+        return hook_name, hook_fn
+
+
+    def mean_ablate(self, layer_idx: int, head_idx: int, mean_cache: dict):
+        """
+        Returns a (hook_name, hook_fn) pair that overwrites one head's output
+        to the mean over the dataset.
+        
+        hook_pattern shape is [batch, n_heads, q, k].
+        """
+        hook_name = f"blocks.{layer_idx}.attn.hook_z"
+        head_mean = mean_cache[layer_idx][head_idx]
+
+        def hook_fn(z: torch.Tensor, hook):
+            z[:, :, head_idx, :] = head_mean
+            return z
+        return hook_name, hook_fn
+    
+
+    def get_mean_head_activations(self, im):
+        """
+        Computes the mean activation for every head across all positions.
+        Returns a dictionary mapping layer index to a tensor of shape [n_heads, d_head]
+        """
         im = self.preprocess(im).to(self.device)
-        hook_name, hook = self.make_head_uniform_over_patches(layer, head)
-        self.model.add_hook(hook_name, hook)
+        
+        # Storage for our results
+        mean_activations = {}
+
+        def save_mean_hook(value, hook):
+            # value shape: [batch, pos, head_index, d_head]
+            # We mean over batch (0) and position (1)
+            mean_activations[hook.layer()] = value.mean(dim=(0, 1)).detach().cpu()
+
+        # Create hook filters for all attention 'z' (head output) hooks
+        # hook_z is the value per head before the final O matrix projection
+
+        pattern = re.compile(r"blocks\.\d+\.attn\.hook_z")
+        matching_hooks = [name for name in self.model.hook_dict.keys() if pattern.match(name)]
+
+        # 2. Create the list of (name, hook_fn) tuples
+        fwd_hooks = [(name, save_mean_hook) for name in matching_hooks]   
+
+        # Run the model with these hooks
+        self.model.run_with_hooks(
+            im,
+            fwd_hooks=fwd_hooks
+        )
+
+        return mean_activations
+
+
+    def run_with_head_ablation(self, im, head_strs, mean_acts, remove_batch_dim=False):
+        im = self.preprocess(im).to(self.device)
+
+        # Head str is "layer_head-idx"
+        # Add hooks to ablate all heads
+        for head_str in head_strs:
+            head_str = head_str.split("_")
+            layer = int(head_str[0])
+            head = int(head_str[1])
+            hook_name, hook = self.mean_ablate(layer, head, mean_acts)
+            self.model.add_hook(hook_name, hook)
+
         logits, cache = self.model.run_with_cache(
                 im,
                 remove_batch_dim=remove_batch_dim
@@ -130,7 +224,11 @@ class Model:
         self.model.reset_hooks(including_permanent=True)
 
         return logits, cache
-
+    
+    def run_with_cache(self, im, remove_batch_dim=False):
+        im = self.preprocess(im).to(self.device)
+        logits, cache = self.model.run_with_cache(im, remove_batch_dim=remove_batch_dim)
+        return logits, cache
 
     def to(self, device):
         self.model.to(device)

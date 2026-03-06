@@ -1,0 +1,14 @@
+ablation_heads:
+- '1_11'
+- '1_3'
+- '1_9'
+- 0_8
+- '1_1'
+dataset: ./cache/scrambled_blobs/test
+layer: 1
+mean_dataset: ./cache/scrambled_blobs/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 16
+probe_path: facebook/dino-vitb16
+tl_model: dino

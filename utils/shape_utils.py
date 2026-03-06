@@ -450,6 +450,95 @@ def generate_blob_keypoints(
     pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
     return center, pts
 
+def generate_close_blob_keypoints(
+    image_size,
+    shape_size: float,
+    shape_complexity: int,
+    margin: int = 0,
+    rng: np.random.Generator | None = None,
+    fill_fraction: float = 0.995,
+):
+    """
+    Generates a large, bumpy closed contour for close-blob scenes.
+    Base support can be circular or oval, then high-frequency radial bumps are
+    added so the contour is noticeably rougher than standard blobs.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    W, H = image_size
+    base_radius = max(4.0, float(shape_size) / 2.0)
+    if (W - 2 * margin) > 2 * base_radius and (H - 2 * margin) > 2 * base_radius:
+        cx = float(rng.uniform(margin + base_radius, W - margin - base_radius))
+        cy = float(rng.uniform(margin + base_radius, H - margin - base_radius))
+    else:
+        cx = float(rng.uniform(margin, W - margin))
+        cy = float(rng.uniform(margin, H - margin))
+    center = (cx, cy)
+
+    max_rx = max(1.0, min(cx - margin, (W - margin) - cx))
+    max_ry = max(1.0, min(cy - margin, (H - margin) - cy))
+
+    # Keep close blobs mostly round to avoid "egg-like" silhouettes.
+    # Only allow mild anisotropy.
+    if rng.uniform() < 0.8:
+        base_rx = base_radius
+        base_ry = base_radius
+    else:
+        aspect = float(rng.uniform(0.9, 0.98))
+        if rng.uniform() < 0.5:
+            base_rx = base_radius
+            base_ry = base_radius * aspect
+        else:
+            base_rx = base_radius * aspect
+            base_ry = base_radius
+
+    base_rx = min(base_rx * fill_fraction, max_rx * 0.995)
+    base_ry = min(base_ry * fill_fraction, max_ry * 0.995)
+    base_rx = max(2.0, base_rx)
+    base_ry = max(2.0, base_ry)
+
+    complexity = max(10, int(shape_complexity))
+    num_points = max(36, complexity * 5)
+    angles = np.linspace(0.0, 2.0 * np.pi, num_points, endpoint=False)
+
+    # Low-frequency random harmonic profile:
+    # more globally irregular and less "spiky symmetric".
+    radial_mod = np.ones(num_points, dtype=float)
+    for k in range(2, 8):
+        coeff = float(rng.normal(0.0, 0.18 / (k ** 0.65)))
+        phase = float(rng.uniform(0.0, 2.0 * np.pi))
+        radial_mod += coeff * np.sin(k * angles + phase)
+
+    # Broad asymmetric lobes/dents (organic "splat" look).
+    n_lobes = _rng_integers(rng, 4, 10)
+    for _ in range(n_lobes):
+        c = float(rng.uniform(0.0, 2.0 * np.pi))
+        w = float(rng.uniform(0.22, 0.55))
+        sgn = -1.0 if rng.uniform() < 0.4 else 1.0
+        a = sgn * float(rng.uniform(0.05, 0.22))
+        d = np.angle(np.exp(1j * (angles - c)))  # wrapped angle difference
+        radial_mod += a * np.exp(-(d * d) / (2.0 * w * w))
+
+    # Tiny residual texture only; keep silhouette smooth.
+    fine_noise = rng.normal(0.0, 1.0, size=num_points)
+    fine_noise = gaussian_filter1d(fine_noise, sigma=max(1.0, num_points / 36.0), mode="wrap")
+    radial_mod += float(rng.uniform(0.01, 0.04)) * fine_noise / (np.max(np.abs(fine_noise)) + 1e-8)
+
+    radial_mod = gaussian_filter1d(radial_mod, sigma=max(0.8, num_points / 56.0), mode="wrap")
+    radial_mod = np.clip(radial_mod, 0.68, 1.65)
+
+    pts = []
+    for a, m in zip(angles, radial_mod):
+        x = cx + base_rx * m * math.cos(a)
+        y = cy + base_ry * m * math.sin(a)
+        x = float(np.clip(x, margin, W - margin))
+        y = float(np.clip(y, margin, H - margin))
+        pts.append((x, y))
+
+    pts = sorted(pts, key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+    return center, pts
+
 def generate_open_path_points(
     image_size,                  # (W,H)
     num_points: int,             # like "shape_complexity" for curves
@@ -1029,6 +1118,17 @@ def draw_shape(
             rng=rng,
             center_bounds=center_bounds,
         )
+    elif shape_type == "close_blobs":
+        center, keypoints = generate_close_blob_keypoints(
+            image_size=(W, H),
+            shape_size=shape_size,
+            shape_complexity=shape_complexity,
+            margin=0,
+            rng=rng,
+            fill_fraction=0.998,
+        )
+        draw_blob(draw, keypoints, fill=shape_color, outline=shape_color, samples_per_seg=30)
+        return center, keypoints
     elif shape_type == "closedcurve":
         add_random_closed_curve_to_image(
             image,

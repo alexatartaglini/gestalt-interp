@@ -666,123 +666,117 @@ def generate_unraveled_open_path_points(
         if x_lo >= x_hi or y_lo >= y_hi:
             raise ValueError("center_bounds too small for given margin.")
 
-    # pick a global forward direction (unit vector)
-    phi = float(rng.uniform(0, 2 * math.pi))
-    forward = (math.cos(phi), math.sin(phi))
+    complexity = max(2, int(num_points))
+    window_diag = math.hypot((x_hi - x_lo), (y_hi - y_lo))
 
-    # start anywhere in window
-    start = (float(rng.uniform(x_lo, x_hi)), float(rng.uniform(y_lo, y_hi)))
-    points = [start]
-
-    # initial heading biased toward forward direction
-    heading = phi + float(rng.uniform(-math.radians(25), math.radians(25)))
-
-    def inside(p):
+    def _inside(p):
         return (x_lo <= p[0] <= x_hi) and (y_lo <= p[1] <= y_hi)
 
-    repel2 = repel_radius * repel_radius
-    max_turn = math.radians(max_turn_deg)
+    def _fallback_points():
+        # Guaranteed, bounded fallback: monotone-ish open polyline.
+        phi = float(rng.uniform(0, 2 * math.pi))
+        heading = phi
+        step_base = max(2.0, 0.45 * (step_range[0] + step_range[1]))
+        start = (float(rng.uniform(x_lo, x_hi)), float(rng.uniform(y_lo, y_hi)))
+        out = [start]
+        for _ in range(complexity - 1):
+            placed = False
+            for _ in range(60):
+                step = float(rng.uniform(0.7 * step_base, 1.3 * step_base))
+                heading_try = heading + float(rng.uniform(-math.radians(28), math.radians(28)))
+                cand = (
+                    out[-1][0] + step * math.cos(heading_try),
+                    out[-1][1] + step * math.sin(heading_try),
+                )
+                if _inside(cand):
+                    out.append(cand)
+                    heading = heading_try
+                    placed = True
+                    break
+            if not placed:
+                out.append((
+                    float(np.clip(out[-1][0], x_lo, x_hi)),
+                    float(np.clip(out[-1][1], y_lo, y_hi)),
+                ))
+        return out
 
-    tries = 0
-    while len(points) < num_points and tries < max_tries:
-        tries += 1
+    # Replace recursive retries with bounded restarts.
+    max_restarts = 28
+    tries_per_restart = max(200, int(max_tries // max_restarts))
+    step_lo = float(max(1.0, min(step_range)))
+    step_hi = float(max(step_lo + 1e-6, max(step_range)))
+    turn_deg = float(max_turn_deg)
+    fwd_min = float(forward_min)
+    repel_r = float(repel_radius)
+    end_far = float(end_far_fraction)
+    min_ang = float(min_angle_deg)
 
-        # propose a small-ish turn (wiggly but not foldy)
-        dtheta = float(rng.uniform(-max_turn, max_turn))
-        # bias to smaller turns for smoothness
-        dtheta2 = float(rng.uniform(-max_turn, max_turn))
-        if abs(dtheta2) < abs(dtheta):
-            dtheta = dtheta2
+    for _ in range(max_restarts):
+        # pick a global forward direction (unit vector)
+        phi = float(rng.uniform(0, 2 * math.pi))
+        forward = (math.cos(phi), math.sin(phi))
+        start = (float(rng.uniform(x_lo, x_hi)), float(rng.uniform(y_lo, y_hi)))
+        points = [start]
+        heading = phi + float(rng.uniform(-math.radians(25), math.radians(25)))
 
-        new_heading = heading + dtheta
-        step = float(rng.uniform(step_range[0], step_range[1]))
+        repel2 = repel_r * repel_r
+        max_turn = math.radians(turn_deg)
 
-        cand = (
-            points[-1][0] + step * math.cos(new_heading),
-            points[-1][1] + step * math.sin(new_heading),
-        )
+        tries = 0
+        while len(points) < complexity and tries < tries_per_restart:
+            tries += 1
+            dtheta = float(rng.uniform(-max_turn, max_turn))
+            dtheta2 = float(rng.uniform(-max_turn, max_turn))
+            if abs(dtheta2) < abs(dtheta):
+                dtheta = dtheta2
 
-        if not inside(cand):
-            continue
+            new_heading = heading + dtheta
+            step = float(rng.uniform(step_lo, step_hi))
+            cand = (
+                points[-1][0] + step * math.cos(new_heading),
+                points[-1][1] + step * math.sin(new_heading),
+            )
 
-        # 1) enforce “unravel” drift: must move forward overall
-        dx, dy = cand[0] - points[-1][0], cand[1] - points[-1][1]
-        proj = (dx * forward[0] + dy * forward[1])  # signed forward progress
-        if proj < forward_min * step:
-            continue
+            if not _inside(cand):
+                continue
 
-        # 2) no self intersections
-        if would_self_intersect(points, cand):
-            continue
+            dx, dy = cand[0] - points[-1][0], cand[1] - points[-1][1]
+            proj = (dx * forward[0] + dy * forward[1])
+            if proj < fwd_min * step:
+                continue
+            if would_self_intersect(points, cand):
+                continue
+            if _min_dist2_to_polyline(cand, points) < repel2:
+                continue
 
-        # 3) repel from earlier trail (prevents almost-closing & hugging itself)
-        #    (ignore last segment neighborhood by checking distance to segments anyway)
-        if _min_dist2_to_polyline(cand, points) < repel2:
-            continue
+            points.append(cand)
+            heading = new_heading
 
-        # accept
-        points.append(cand)
-        heading = new_heading
+        if len(points) == complexity:
+            # Endpoint should not look almost closed.
+            min_end_dist = max(0.0, end_far) * window_diag
+            end_dist = math.hypot(points[-1][0] - start[0], points[-1][1] - start[1])
+            if end_dist < min_end_dist:
+                # Relax and retry.
+                end_far = max(0.2, end_far * 0.9)
+                turn_deg = min(130.0, turn_deg + 4.0)
+                fwd_min = max(0.02, fwd_min * 0.9)
+                continue
 
-    # If short, retry with slightly relaxed params
-    if len(points) < num_points:
-        return generate_unraveled_open_path_points(
-            image_size=image_size,
-            num_points=num_points,
-            margin=margin,
-            rng=rng,
-            step_range=step_range,
-            max_turn_deg=min(120.0, max_turn_deg + 15.0),
-            forward_min=max(0.05, forward_min * 0.8),
-            repel_radius=max(10.0, repel_radius * 0.85),
-            end_far_fraction=end_far_fraction,
-            max_tries=max_tries,
-            min_angle_deg=min_angle_deg,
-            center_bounds=center_bounds,
-        )
+            points = enforce_min_turn_angles(points, min_ang)
+            if satisfies_min_angle(points, min_ang):
+                return points
 
-    # 4) enforce endpoint “not almost closed”: end far from start
-    # compute a scale for "far" as a fraction of the window diagonal
-    diag = math.hypot((x_hi - x_lo), (y_hi - y_lo))
-    min_end_dist = end_far_fraction * diag
-    end_dist = math.hypot(points[-1][0] - start[0], points[-1][1] - start[1])
-    if end_dist < min_end_dist and tries < max_tries:
-        # restart if it still looks too closed
-        return generate_unraveled_open_path_points(
-            image_size=image_size,
-            num_points=num_points,
-            margin=margin,
-            rng=rng,
-            step_range=step_range,
-            max_turn_deg=max_turn_deg,
-            forward_min=forward_min,
-            repel_radius=repel_radius,
-            end_far_fraction=max(0.35, end_far_fraction * 0.9),
-            max_tries=max_tries,
-            min_angle_deg=min_angle_deg,
-            center_bounds=center_bounds,
-        )
+        # Progressive relaxation for next restart
+        turn_deg = min(130.0, turn_deg + 7.0)
+        fwd_min = max(0.02, fwd_min * 0.87)
+        repel_r = max(2.0, repel_r * 0.85)
+        end_far = max(0.2, end_far * 0.9)
+        min_ang = max(35.0, min_ang * 0.92)
+        step_lo = max(1.0, step_lo * 0.93)
+        step_hi = max(step_lo + 1.0, step_hi * 0.95)
 
-    # 5) enforce minimum angle constraint
-    points = enforce_min_turn_angles(points, min_angle_deg)
-
-    if not satisfies_min_angle(points, min_angle_deg):
-        return generate_unraveled_open_path_points(
-            image_size=image_size,
-            num_points=num_points,
-            margin=margin,
-            rng=rng,
-            step_range=step_range,
-            max_turn_deg=max_turn_deg,
-            forward_min=forward_min,
-            repel_radius=repel_radius,
-            end_far_fraction=end_far_fraction,
-            max_tries=max_tries,
-            min_angle_deg=min_angle_deg,
-            center_bounds=center_bounds,
-        )
-
-    return points
+    return _fallback_points()
 
 def generate_backbone(image_size, num_points, shape_size, margin, rng, center_bounds=None):
     W, H = image_size
@@ -861,6 +855,16 @@ def generate_open_curve_points(
     # Keep steps in a stable range while preserving the requested length scale.
     step_lo = max(3.0, 0.7 * avg_step)
     step_hi = max(step_lo + 1.0, 1.3 * avg_step)
+    if center_bounds is None:
+        span_x = image_size[0] - 2 * margin
+        span_y = image_size[1] - 2 * margin
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+        span_x = x_hi - x_lo
+        span_y = y_hi - y_lo
+    max_step = max(3.5, 0.55 * min(span_x, span_y))
+    step_hi = min(step_hi, max_step)
+    step_lo = min(step_lo, max(3.0, 0.8 * step_hi))
 
     pts = generate_unraveled_open_path_points(
         image_size=image_size,

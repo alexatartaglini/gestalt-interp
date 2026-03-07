@@ -259,6 +259,30 @@ def _polyline_length(points):
         total += math.hypot(dx, dy)
     return total
 
+def _curve_is_non_degenerate(points, min_poly_len, min_end_to_end, min_seg_len, min_rounded_len):
+    if len(points) < 2:
+        return False
+    poly_len = _polyline_length(points)
+    if poly_len < min_poly_len:
+        return False
+    end_dist = math.hypot(points[-1][0] - points[0][0], points[-1][1] - points[0][1])
+    if end_dist < min_end_to_end:
+        return False
+    seg_min = min(
+        math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
+        for i in range(len(points) - 1)
+    )
+    if seg_min < min_seg_len:
+        return False
+
+    rounded = [(int(round(p[0])), int(round(p[1]))) for p in points]
+    if len(set(rounded)) < 3:
+        return False
+    rounded_len = _polyline_length(rounded)
+    if rounded_len < min_rounded_len:
+        return False
+    return True
+
 def _rng_integers(rng, low: int, high: int) -> int:
     """
     Compatibility wrapper for both numpy Generator and RandomState.
@@ -885,8 +909,10 @@ def generate_open_curve_points(
     step_hi = min(step_hi, max_step)
     step_lo = min(step_lo, max(3.0, 0.8 * step_hi))
     target_length = min(target_length, 0.9 * math.hypot(span_x, span_y))
-    min_realized_length = max(10.0, 0.62 * target_length)
-    min_end_to_end = max(6.0, 0.28 * target_length)
+    min_realized_length = max(12.0, 0.70 * target_length)
+    min_end_to_end = max(8.0, 0.36 * target_length)
+    min_seg_len = max(1.8, 0.22 * avg_step)
+    min_rounded_len = max(10.0, 0.45 * target_length)
 
     # Bounded retries: reject curves that are too short for the requested size.
     for _ in range(6):
@@ -904,17 +930,55 @@ def generate_open_curve_points(
             min_angle_deg=max(70.0, 130.0 - 2.5 * float(wiggle_smooth)),
             center_bounds=center_bounds,
         )
-        realized_len = _polyline_length(pts)
-        end_to_end = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
-        if realized_len >= min_realized_length and end_to_end >= min_end_to_end:
+        if _curve_is_non_degenerate(
+            pts,
+            min_poly_len=min_realized_length,
+            min_end_to_end=min_end_to_end,
+            min_seg_len=min_seg_len,
+            min_rounded_len=min_rounded_len,
+        ):
             return [tuple(p) for p in pts]
         step_lo *= 1.10
         step_hi *= 1.15
         max_step = max(3.5, 0.65 * min(span_x, span_y))
         step_hi = min(step_hi, max_step)
         step_lo = min(step_lo, max(3.0, 0.8 * step_hi))
+        min_seg_len = max(1.5, min_seg_len * 0.95)
 
-    return [tuple(p) for p in pts]
+    # Hard fallback: explicitly construct a long path from far endpoints.
+    for _ in range(6):
+        pts = generate_open_curve_fixed_size(
+            image_size=image_size,
+            num_points=complexity,
+            shape_size=target_length,
+            margin=margin,
+            rng=rng,
+            lateral_frac=0.28,
+            mix_beta=0.20,
+            center_bounds=center_bounds,
+        )
+        if _curve_is_non_degenerate(
+            pts,
+            min_poly_len=max(10.0, 0.55 * target_length),
+            min_end_to_end=max(7.0, 0.42 * target_length),
+            min_seg_len=1.4,
+            min_rounded_len=max(9.0, 0.35 * target_length),
+        ):
+            return [tuple(p) for p in pts]
+
+    # Last-resort deterministic line with complexity-spaced points.
+    if center_bounds is None:
+        x_lo, x_hi = margin, image_size[0] - margin
+        y_lo, y_hi = margin, image_size[1] - margin
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+    cy = 0.5 * (y_lo + y_hi)
+    usable = max(12.0, min(x_hi - x_lo, target_length))
+    sx = 0.5 * (x_lo + x_hi) - 0.5 * usable
+    ex = sx + usable
+    t = np.linspace(0.0, 1.0, complexity)
+    pts = [(float((1.0 - u) * sx + u * ex), float(cy)) for u in t]
+    return pts
 
 def generate_open_curve_fixed_size(
     image_size,
@@ -924,15 +988,24 @@ def generate_open_curve_fixed_size(
     rng=None,
     lateral_frac=0.35,
     mix_beta=0.25,
+    center_bounds=None,
 ):
     if rng is None:
         rng = np.random.default_rng()
 
     W, H = image_size
+    if center_bounds is None:
+        x_lo, x_hi = margin, W - margin
+        y_lo, y_hi = margin, H - margin
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
+    if x_lo >= x_hi or y_lo >= y_hi:
+        raise ValueError("invalid bounds for generate_open_curve_fixed_size")
 
     # --- endpoints ---
+    shape_size = float(min(shape_size, 0.9 * math.hypot(x_hi - x_lo, y_hi - y_lo)))
     for _ in range(100):
-        center = rng.uniform([margin, margin], [W-margin, H-margin])
+        center = rng.uniform([x_lo, y_lo], [x_hi, y_hi])
         theta = rng.uniform(0, 2*np.pi)
         u = np.array([np.cos(theta), np.sin(theta)])
         v = np.array([-u[1], u[0]])
@@ -940,11 +1013,18 @@ def generate_open_curve_fixed_size(
         p0 = center - 0.5 * shape_size * u
         p1 = center + 0.5 * shape_size * u
 
-        if all(margin <= p0) and p0[0] <= W-margin and p0[1] <= H-margin \
-           and all(margin <= p1) and p1[0] <= W-margin and p1[1] <= H-margin:
+        if x_lo <= p0[0] <= x_hi and y_lo <= p0[1] <= y_hi \
+           and x_lo <= p1[0] <= x_hi and y_lo <= p1[1] <= y_hi:
             break
     else:
-        raise RuntimeError("Could not place endpoints")
+        # Deterministic long-axis fallback.
+        center = np.array([(x_lo + x_hi) / 2.0, (y_lo + y_hi) / 2.0], dtype=float)
+        u = np.array([1.0, 0.0], dtype=float)
+        v = np.array([0.0, 1.0], dtype=float)
+        usable = 0.9 * (x_hi - x_lo)
+        shape_size = min(shape_size, usable)
+        p0 = center - 0.5 * shape_size * u
+        p1 = center + 0.5 * shape_size * u
 
     points = [p0, p1]
 
@@ -957,6 +1037,7 @@ def generate_open_curve_fixed_size(
         t = rng.uniform(0, D)
         s = rng.uniform(-alpha*D, alpha*D)
         p = p0 + t*u + s*v
+        p = np.array([np.clip(p[0], x_lo, x_hi), np.clip(p[1], y_lo, y_hi)], dtype=float)
         interior.append(p)
 
     # --- ordering ---
@@ -968,7 +1049,7 @@ def generate_open_curve_fixed_size(
 
     interior.sort(key=sort_key)
 
-    return [p0] + interior + [p1]
+    return [tuple(p0)] + [tuple(p) for p in interior] + [tuple(p1)]
 
 #### DRAWING FUNCTIONS
 
@@ -993,6 +1074,11 @@ def draw_closed_curve(draw: ImageDraw.ImageDraw, keypoints, center, fill, outlin
 
 def draw_open_curve(draw: ImageDraw.ImageDraw, points, color, width: int = 6, samples_per_seg: int = 25):
     curve = open_catmull_rom(points, samples_per_seg=samples_per_seg)
+    rounded = [(int(round(x)), int(round(y))) for (x, y) in curve]
+    if len(set(rounded)) < 3 or _polyline_length(rounded) < max(6.0, 2.5 * float(width)):
+        # Guard against pixel-level collapse; always render a visible stroke.
+        draw.line([points[0], points[-1]], fill=color, width=width, joint="curve")
+        return
     draw.line(curve, fill=color, width=width, joint="curve")
 
 

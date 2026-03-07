@@ -249,6 +249,16 @@ def _min_dist2_to_polyline(p, points):
         best = min(best, _dist2_point_to_segment(p, points[i], points[i + 1]))
     return best
 
+def _polyline_length(points):
+    if len(points) < 2:
+        return 0.0
+    total = 0.0
+    for i in range(len(points) - 1):
+        dx = points[i + 1][0] - points[i][0]
+        dy = points[i + 1][1] - points[i][1]
+        total += math.hypot(dx, dy)
+    return total
+
 def _rng_integers(rng, low: int, high: int) -> int:
     """
     Compatibility wrapper for both numpy Generator and RandomState.
@@ -694,10 +704,19 @@ def generate_unraveled_open_path_points(
                     placed = True
                     break
             if not placed:
-                out.append((
-                    float(np.clip(out[-1][0], x_lo, x_hi)),
-                    float(np.clip(out[-1][1], y_lo, y_hi)),
-                ))
+                # If heading-based proposals all fail, force a non-degenerate move.
+                fallback_step = max(2.0, 0.5 * step_base)
+                cand = (
+                    out[-1][0] + fallback_step * math.cos(heading),
+                    out[-1][1] + fallback_step * math.sin(heading),
+                )
+                cand = (
+                    float(np.clip(cand[0], x_lo, x_hi)),
+                    float(np.clip(cand[1], y_lo, y_hi)),
+                )
+                if math.hypot(cand[0] - out[-1][0], cand[1] - out[-1][1]) < 1.0:
+                    cand = (float(rng.uniform(x_lo, x_hi)), float(rng.uniform(y_lo, y_hi)))
+                out.append(cand)
         return out
 
     # Replace recursive retries with bounded restarts.
@@ -865,21 +884,36 @@ def generate_open_curve_points(
     max_step = max(3.5, 0.55 * min(span_x, span_y))
     step_hi = min(step_hi, max_step)
     step_lo = min(step_lo, max(3.0, 0.8 * step_hi))
+    target_length = min(target_length, 0.9 * math.hypot(span_x, span_y))
+    min_realized_length = max(10.0, 0.62 * target_length)
+    min_end_to_end = max(6.0, 0.28 * target_length)
 
-    pts = generate_unraveled_open_path_points(
-        image_size=image_size,
-        num_points=complexity,
-        margin=margin,
-        rng=rng,
-        step_range=(step_lo, step_hi),
-        # Larger wiggle_amp allows bendier paths, but keep them unraveled.
-        max_turn_deg=float(np.clip(35.0 + 0.4 * float(wiggle_amp), 35.0, 85.0)),
-        forward_min=0.2,
-        repel_radius=max(8.0, 0.25 * avg_step),
-        end_far_fraction=0.5,
-        min_angle_deg=max(70.0, 130.0 - 2.5 * float(wiggle_smooth)),
-        center_bounds=center_bounds,
-    )
+    # Bounded retries: reject curves that are too short for the requested size.
+    for _ in range(6):
+        pts = generate_unraveled_open_path_points(
+            image_size=image_size,
+            num_points=complexity,
+            margin=margin,
+            rng=rng,
+            step_range=(step_lo, step_hi),
+            # Larger wiggle_amp allows bendier paths, but keep them unraveled.
+            max_turn_deg=float(np.clip(35.0 + 0.4 * float(wiggle_amp), 35.0, 85.0)),
+            forward_min=0.2,
+            repel_radius=max(8.0, 0.25 * avg_step),
+            end_far_fraction=0.5,
+            min_angle_deg=max(70.0, 130.0 - 2.5 * float(wiggle_smooth)),
+            center_bounds=center_bounds,
+        )
+        realized_len = _polyline_length(pts)
+        end_to_end = math.hypot(pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+        if realized_len >= min_realized_length and end_to_end >= min_end_to_end:
+            return [tuple(p) for p in pts]
+        step_lo *= 1.10
+        step_hi *= 1.15
+        max_step = max(3.5, 0.65 * min(span_x, span_y))
+        step_hi = min(step_hi, max_step)
+        step_lo = min(step_lo, max(3.0, 0.8 * step_hi))
+
     return [tuple(p) for p in pts]
 
 def generate_open_curve_fixed_size(

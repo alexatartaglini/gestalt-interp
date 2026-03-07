@@ -738,6 +738,7 @@ def generate_unraveled_open_path_points(
             end_far_fraction=end_far_fraction,
             max_tries=max_tries,
             min_angle_deg=min_angle_deg,
+            center_bounds=center_bounds,
         )
 
     # 4) enforce endpoint “not almost closed”: end far from start
@@ -759,6 +760,7 @@ def generate_unraveled_open_path_points(
             end_far_fraction=max(0.35, end_far_fraction * 0.9),
             max_tries=max_tries,
             min_angle_deg=min_angle_deg,
+            center_bounds=center_bounds,
         )
 
     # 5) enforce minimum angle constraint
@@ -777,14 +779,18 @@ def generate_unraveled_open_path_points(
             end_far_fraction=end_far_fraction,
             max_tries=max_tries,
             min_angle_deg=min_angle_deg,
+            center_bounds=center_bounds,
         )
 
     return points
 
-def generate_backbone(image_size, num_points, shape_size, margin, rng):
+def generate_backbone(image_size, num_points, shape_size, margin, rng, center_bounds=None):
     W, H = image_size
-    x_lo, x_hi = margin, W - margin
-    y_lo, y_hi = margin, H - margin
+    if center_bounds is None:
+        x_lo, x_hi = margin, W - margin
+        y_lo, y_hi = margin, H - margin
+    else:
+        (x_lo, x_hi), (y_lo, y_hi) = center_bounds
 
     # random forward direction
     phi = rng.uniform(0, 2 * math.pi)
@@ -841,26 +847,35 @@ def generate_open_curve_points(
     wiggle_smooth=6.0,
     margin=32,
     rng=None,
+    center_bounds=None,
 ):
     if rng is None:
         rng = np.random.default_rng()
 
-    backbone = generate_backbone(
+    # Curve complexity is controlled by num_points, and overall curve length
+    # is controlled by shape_size via the per-segment step range.
+    complexity = max(3, int(num_points))
+    target_length = max(8.0, float(shape_size))
+    avg_step = target_length / max(1, complexity - 1)
+
+    # Keep steps in a stable range while preserving the requested length scale.
+    step_lo = max(3.0, 0.7 * avg_step)
+    step_hi = max(step_lo + 1.0, 1.3 * avg_step)
+
+    pts = generate_unraveled_open_path_points(
         image_size=image_size,
-        num_points=num_points,
-        shape_size=shape_size,
+        num_points=complexity,
         margin=margin,
         rng=rng,
+        step_range=(step_lo, step_hi),
+        # Larger wiggle_amp allows bendier paths, but keep them unraveled.
+        max_turn_deg=float(np.clip(35.0 + 0.4 * float(wiggle_amp), 35.0, 85.0)),
+        forward_min=0.2,
+        repel_radius=max(8.0, 0.25 * avg_step),
+        end_far_fraction=0.5,
+        min_angle_deg=max(70.0, 130.0 - 2.5 * float(wiggle_smooth)),
+        center_bounds=center_bounds,
     )
-
-    pts = add_lateral_noise(
-        backbone,
-        max_amp=wiggle_amp,
-        smooth_sigma=wiggle_smooth,
-        rng=rng,
-    )
-
-    pts = clamp_points(pts, image_size, margin)
     return [tuple(p) for p in pts]
 
 def generate_open_curve_fixed_size(

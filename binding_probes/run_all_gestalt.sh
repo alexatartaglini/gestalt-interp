@@ -1,5 +1,5 @@
 export PROJECT_DIR=/users/mlepori/data/mlepori/projects/gestalt-interp/
-export CONFIG_DIR=configs/imagenet_32
+export CONFIG_DIR=configs/clip_16
 
 for file in ${CONFIG_DIR}/*;
 do

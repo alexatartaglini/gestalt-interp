@@ -177,8 +177,6 @@ def cfg2labels(file):
     filtered_obj1_patches = list(set(obj1_patches) - set(obj2_patches))
     filtered_obj2_patches = list(set(obj2_patches) - set(obj1_patches))
 
-    print(f"Overlapping count: {len(obj1_patches) - len(filtered_obj1_patches)}")
-
     # We get rid of the [CLS] token, so 0 index these object patches
     obj1_patches = [idx - 1 for idx in filtered_obj1_patches] 
     obj2_patches = [idx - 1 for idx in filtered_obj2_patches]

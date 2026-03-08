@@ -26,7 +26,7 @@ if __name__ == "__main__":
         base = yaml.load(stream, Loader=yaml.FullLoader)
 
     for model in ["clip_16", "clip_32", "dino_16", "dinov2_14", "imagenet_16", "imagenet_32", "mae_16"]:
-        df = pd.read_csv(f"../cache/continuity_scores/rotation_normalized_amplitude_{model}_filled_blobs.csv")
+        df = pd.read_csv(f"../cache/continuity_scores/rotation_normalized_amplitude_{model}_curves.csv")
 
         patch_size = int(model.split("_")[1])
         tl_model = model.split("_")[0]
@@ -53,7 +53,7 @@ if __name__ == "__main__":
             config["layer"] = layer
             config["ablation_heads"] = heads
 
-            os.makedirs(model, exist_ok=True)
-            config_path = os.path.join(model, config_name + ".yaml")
+            os.makedirs(os.path.join("curves", model), exist_ok=True)
+            config_path = os.path.join("curves", model, config_name + ".yaml")
             with open(config_path, 'w') as cfg_file:
                 yaml.dump(config, cfg_file)

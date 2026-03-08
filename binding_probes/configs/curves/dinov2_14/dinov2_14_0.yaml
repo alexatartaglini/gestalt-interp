@@ -1,0 +1,14 @@
+ablation_heads:
+- '0_6'
+- '0_1'
+- '0_4'
+- 0_9
+- '0_2'
+dataset: ./cache/scrambled_curves/test
+layer: 0
+mean_dataset: ./cache/scrambled_curves/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 14
+probe_path: facebook/dinov2-base
+tl_model: dinov2

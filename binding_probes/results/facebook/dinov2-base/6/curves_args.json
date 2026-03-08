@@ -1,0 +1,1 @@
+{"model": "facebook/dinov2-base", "batch_size": 256, "dataset_prefix": "curves_", "lr": 0.001, "step_size": 8, "scheduler_gamma": 0.2, "max_epochs": 20, "layers": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "outfolder": "./results"}

@@ -20,13 +20,13 @@ def parse_arguments():
     parser.add_argument(
         "-m",
         "--model",
-        default="openai/clip-vit-base-patch32",
+        default="facebook/vit-mae-base",
         help="Model to use as backbone for analysis",
     )
 
     parser.add_argument(
         "-dataset",
-        default="./cache/scrambled_blobs",
+        default="./cache/scrambled_curves",
         type=str,
     )
 
@@ -40,6 +40,12 @@ def parse_arguments():
         "-random_seed",
         default=19,
         type=int
+    )
+
+    parser.add_argument(
+        "-save_prefix",
+        default="curves_",
+        type=str
     )
 
     args = parser.parse_args()
@@ -84,6 +90,9 @@ if __name__ == "__main__":
     # Parse Args
     args = parse_arguments()
 
+    if "curves" in args.dataset:
+        args.save_prefix = "curves_"
+
     # Load up model and image preprocessor
     if "scratch" not in args.model:
         processor = AutoImageProcessor.from_pretrained(args.model)
@@ -105,17 +114,17 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
     
     args_dict = vars(args)
-    with open(os.path.join(output_dir, "args.json"), "w") as f:
+    with open(os.path.join(output_dir, args.save_prefix + "args.json"), "w") as f:
         json.dump(args_dict, f)
 
     train_features, train_labels = process_dataset(args, "train", processor, model)
     val_features, val_labels = process_dataset(args, "val", processor, model)
     test_features, test_labels = process_dataset(args, "test", processor, model)
 
-    torch.save(train_features, os.path.join(output_dir, "train_features.pth"))
-    torch.save(val_features, os.path.join(output_dir, "val_features.pth"))
-    torch.save(test_features, os.path.join(output_dir, "test_features.pth"))
+    torch.save(train_features, os.path.join(output_dir, args.save_prefix + "train_features.pth"))
+    torch.save(val_features, os.path.join(output_dir, args.save_prefix + "val_features.pth"))
+    torch.save(test_features, os.path.join(output_dir, args.save_prefix + "test_features.pth"))
 
-    torch.save(train_labels, os.path.join(output_dir, "train_labels.pth"))
-    torch.save(val_labels, os.path.join(output_dir, "val_labels.pth"))
-    torch.save(test_labels, os.path.join(output_dir, "test_labels.pth"))
+    torch.save(train_labels, os.path.join(output_dir, args.save_prefix + "train_labels.pth"))
+    torch.save(val_labels, os.path.join(output_dir, args.save_prefix + "val_labels.pth"))
+    torch.save(test_labels, os.path.join(output_dir, args.save_prefix + "test_labels.pth"))

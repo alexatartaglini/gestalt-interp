@@ -1,4 +1,6 @@
 binding_probes/cache/scrambled_blobs
+binding_probes/cache/scrambled_curves
+
 *.pyc
 *features.pth
 *labels.pth

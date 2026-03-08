@@ -1,0 +1,14 @@
+ablation_heads:
+- '3_0'
+- '1_9'
+- '2_7'
+- '3_4'
+- '2_8'
+dataset: ./cache/scrambled_curves/test
+layer: 3
+mean_dataset: ./cache/scrambled_curves/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 16
+probe_path: facebook/vit-mae-base
+tl_model: mae

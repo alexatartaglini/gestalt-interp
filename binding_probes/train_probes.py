@@ -32,6 +32,13 @@ def parse_arguments():
         type=int,
     )
 
+    parser.add_argument(
+        "--dataset_prefix",
+        default="curves_",
+        type=str,
+        help="Prefix to add to the dataset name"
+    )
+
     parser.add_argument("--lr", default=0.001)
 
     parser.add_argument("--step_size", default=8)
@@ -188,13 +195,13 @@ if __name__ == "__main__":
 
     for layer in args.layers:
         trainset = utils.dataset.ProbeDataset(
-            path=f"./cache/{args.model}/train", layer=layer
+            path=f"./cache/{args.model}/{args.dataset_prefix}train", layer=layer
         )
         valset = utils.dataset.ProbeDataset(
-            path=f"./cache/{args.model}/val", layer=layer
+            path=f"./cache/{args.model}/{args.dataset_prefix}val", layer=layer
         )
         testset = utils.dataset.ProbeDataset(
-            path=f"./cache/{args.model}/test", layer=layer
+            path=f"./cache/{args.model}/{args.dataset_prefix}test", layer=layer
         )
 
         probe_size = trainset[0][0].shape[-1]
@@ -208,13 +215,13 @@ if __name__ == "__main__":
 
         output_dir = os.path.join(args.outfolder, args.model, str(layer))
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, "results.json"), "w") as f:
+        with open(os.path.join(output_dir, args.dataset_prefix + "results.json"), "w") as f:
             json.dump(results, f)
-        with open(os.path.join(output_dir, "test_results.json"), "w") as f:
+        with open(os.path.join(output_dir, args.dataset_prefix + "test_results.json"), "w") as f:
             json.dump(test_results, f)
 
         args_dict = vars(args)
-        with open(os.path.join(output_dir, "args.json"), "w") as f:
+        with open(os.path.join(output_dir, args.dataset_prefix + "args.json"), "w") as f:
             json.dump(args_dict, f)
 
-        torch.save(probe.state_dict(), os.path.join(output_dir, "probe.pth"))
+        torch.save(probe.state_dict(), os.path.join(output_dir, args.dataset_prefix + "probe.pth"))

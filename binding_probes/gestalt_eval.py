@@ -49,7 +49,7 @@ def parse_arguments():
 
     parser.add_argument(
         "--dataset",
-        default="./cache/scrambled_blobs/test",
+        default="./cache/scrambled_curves/test",
         type=str,
         help="The directory containing test objects",
     )
@@ -229,6 +229,11 @@ if __name__ == "__main__":
     # Parse Args
     args = get_config()
 
+    if "curves" in args["dataset"]:
+        args["dataset_prefix"] = "curves_"
+    else:
+        args["dataset_prefix"] = ""
+
     # Load up model and image preprocessor
     model = Model(
         pretrain=args["tl_model"],  # imagenet, dinov2, scratch
@@ -237,7 +242,7 @@ if __name__ == "__main__":
     model.to("cuda")
 
     probe = QuadraticProbe(model.model.cfg.d_model)
-    probe_state_dict = torch.load(f"./results/{args["probe_path"]}/{args["layer"]}/probe.pth")
+    probe_state_dict = torch.load(f"./results/{args["probe_path"]}/{args["layer"]}/{args["dataset_prefix"]}probe.pth")
     probe.load_state_dict(probe_state_dict)
     probe.eval().to("cuda").to(dtype=torch.float32)
 
@@ -295,7 +300,7 @@ if __name__ == "__main__":
             args["outfolder"], args["probe_path"], str(args["layer"]),
         )
         os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, "gestalt_eval.json"), "w") as f:
+        with open(os.path.join(output_dir, args["dataset_prefix"] + "gestalt_eval.json"), "w") as f:
             json.dump(results, f)
 
         print("Finished!")

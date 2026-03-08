@@ -1,0 +1,14 @@
+ablation_heads:
+- '0_11'
+- '1_10'
+- '1_3'
+- '0_0'
+- '1_7'
+dataset: ./cache/scrambled_curves/test
+layer: 1
+mean_dataset: ./cache/scrambled_curves/val
+n_controls: 20
+outfolder: ./results/
+patch_size: 16
+probe_path: openai/clip-vit-base-patch16
+tl_model: clip

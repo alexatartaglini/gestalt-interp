@@ -270,7 +270,7 @@ if __name__ == "__main__":
     # Now, run mean ablations
     print("Running ablation on all datasets...")
     results["ablation"] = {}
-    for dataset in ["base"]:
+    for dataset in dataset_list:
         results["ablation"][dataset] = {}
         accuracy, chance_diff_object = evalutate_dataset(
             args, dataset, model, probe, heads=args["ablation_heads"], mean_acts=layer2activations
@@ -283,24 +283,23 @@ if __name__ == "__main__":
 
     # Finally, run controls
     results["controls"] = {}
-    for dataset in ["base"]:
-        results["controls"][dataset] = defaultdict(list)
 
-        print(f"Running controls on {dataset}...")
+    for n in tqdm(range(args["n_controls"])):
+        sampled_heads = sample_disjoint_head_set(head_dict)
 
-        for n in tqdm(range(args["n_controls"])):
-            sampled_heads = sample_disjoint_head_set(head_dict)
+        for dataset in dataset_list:
+            results["controls"][dataset] = defaultdict(list)
             accuracy, chance_diff_object = evalutate_dataset(
                 args, dataset, model, probe, heads=sampled_heads, mean_acts=layer2activations
             )
             results["controls"][dataset]["accuracy"].append(accuracy)
             results["controls"][dataset]["chance (different)"].append(chance_diff_object)
 
-        output_dir = os.path.join(
-            args["outfolder"], args["probe_path"], str(args["layer"]),
-        )
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, args["dataset_prefix"] + "gestalt_eval.json"), "w") as f:
-            json.dump(results, f)
+    output_dir = os.path.join(
+        args["outfolder"], args["probe_path"], str(args["layer"]),
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, args["dataset_prefix"] + "gestalt_eval.json"), "w") as f:
+        json.dump(results, f)
 
-        print("Finished!")
+    print("Finished!")

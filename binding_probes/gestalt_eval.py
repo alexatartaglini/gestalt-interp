@@ -284,11 +284,14 @@ if __name__ == "__main__":
     # Finally, run controls
     results["controls"] = {}
 
+    # Initialize dictionaries
+    for dataset in dataset_list:
+        results["controls"][dataset] = defaultdict(list)
+
     for n in tqdm(range(args["n_controls"])):
         sampled_heads = sample_disjoint_head_set(head_dict)
 
         for dataset in dataset_list:
-            results["controls"][dataset] = defaultdict(list)
             accuracy, chance_diff_object = evalutate_dataset(
                 args, dataset, model, probe, heads=sampled_heads, mean_acts=layer2activations
             )

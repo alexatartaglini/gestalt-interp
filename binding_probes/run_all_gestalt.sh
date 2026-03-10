@@ -1,5 +1,5 @@
 export PROJECT_DIR=/users/mlepori/data/mlepori/projects/gestalt-interp/
-export CONFIG_DIR=configs/curves/clip_16
+export CONFIG_DIR=configs/curves/mae_16
 
 for file in ${CONFIG_DIR}/*;
 do
